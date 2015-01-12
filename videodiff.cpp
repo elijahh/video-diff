@@ -318,6 +318,7 @@ std::vector<std::pair<int, int> > align(cv::VideoCapture Va, cv::VideoCapture Vb
 	keyframes.push_back(i);
       }
     }
+    keyframes.push_back(frameX.size()-1);
     cv::Mat correl1;
     cv::filter2D(s1, correl1, -1, s2);
     cv::Mat correl2;
@@ -383,8 +384,62 @@ std::vector<std::pair<int, int> > align(cv::VideoCapture Va, cv::VideoCapture Vb
 }
 
 
+int getBorderSize(cv::Mat frame, bool x) {
+  cv::Vec3b color = frame.at<cv::Vec3b>(0, 0);
+  int borderSize = 0;
+  bool endBorder = false;
+  if (x) frame = frame.t();
+  for (int i = 0; i < frame.rows / 2; ++i) {
+    for (int j = 0; j < frame.cols; ++j) {
+      if (frame.at<cv::Vec3b>(i, j) != color
+	  || frame.at<cv::Vec3b>(frame.rows-i-1, j) != color) {
+	endBorder = true;
+      }
+    }
+    if (endBorder) break;
+    ++borderSize;
+  }
+  return borderSize;
+}
+
+
+void detectAndCropBorders(Clip& clip, cv::Mat& frame1, cv::Mat& frame2) {
+  int borderY1 = getBorderSize(frame1, false);
+  int borderY2 = getBorderSize(frame2, false);
+  int borderX1 = getBorderSize(frame1, true);
+  int borderX2 = getBorderSize(frame2, true);
+  int borderYDelta = borderY1 - borderY2;
+  int borderXDelta = borderX1 - borderX2;
+  if (frame1.rows != frame2.rows || frame1.cols != frame2.cols) {
+    float scalingY = (float) frame2.rows / frame1.rows;
+    float scalingX = (float) frame2.cols / frame1.cols;
+    if (((frame1.rows - frame2.rows) / 2 == borderYDelta)
+	|| ((frame1.cols - frame2.cols) / 2 == borderXDelta)) {
+      Transformation borderChange;
+      borderChange.type = "border change";
+      borderChange.degree = cv::Point2f(-borderXDelta, -borderYDelta);
+      clip.transformations.push_back(borderChange);
+    } else if (scalingY * borderY1 == borderY2
+	       || scalingX * borderX1 == borderX2) {
+      Transformation spatialScaling;
+      spatialScaling.type = "spatial scaling";
+      spatialScaling.degree = cv::Point2f(scalingX, scalingY);
+      clip.transformations.push_back(spatialScaling);
+    }
+  } else if (borderX1 != borderX2 || borderY1 != borderY2) {
+    Transformation borderChange;
+    borderChange.type = "border change";
+    borderChange.degree = cv::Point2f(-borderXDelta, -borderYDelta);
+    clip.transformations.push_back(borderChange);
+  }
+  frame1 = frame1(cv::Rect(borderX1, borderY1, frame1.cols-borderX1, frame1.rows-borderY1));
+  frame2 = frame2(cv::Rect(borderX2, borderY2, frame2.cols-borderX2, frame2.rows-borderY2));
+}
+
+
 void diff(cv::VideoCapture Va, cv::VideoCapture Vb, const std::vector<std::pair<int, int> >& framePairs) {
-  for (auto p : framePairs) {
+  for (int i = 0; i < framePairs.size()-1; ++i) {
+    std::pair<int, int> p = framePairs[i];
     Va.set(CV_CAP_PROP_POS_FRAMES, p.first);
     Vb.set(CV_CAP_PROP_POS_FRAMES, p.second);
     cv::Mat frame1;
@@ -392,7 +447,11 @@ void diff(cv::VideoCapture Va, cv::VideoCapture Vb, const std::vector<std::pair<
     cv::Mat frame2;
     bool flag2 = Vb.read(frame2);
     if (flag1 && flag2) {
-
+      Clip clip;
+      clip.endpoints = std::make_pair(p.second, framePairs[i+1].second);
+      clip.parentEndpoints = std::make_pair(p.first, framePairs[i+1].first);
+      detectAndCropBorders(clip, frame1, frame2);
+      if (!clip.transformations.empty()) deltaReport.push_back(clip);
     }
   }
 }
