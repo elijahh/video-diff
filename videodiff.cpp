@@ -257,19 +257,12 @@ std::vector<std::pair<int, int> > align(cv::VideoCapture Va, cv::VideoCapture Vb
   }
 
   std::vector<std::pair<int, int> > framePairs;
+  std::vector<std::pair<int, int> > endpointsInParent;
   for (auto segment : matchingSegments) {
     cv::Point2i upperLeft = std::get<0>(segment);
     cv::Point2i lowerRight = std::get<1>(segment);
     double m = std::get<2>(segment);
     double b = std::get<3>(segment);
-    Clip clip;
-    clip.endpoints = std::make_pair(upperLeft.y, lowerRight.y);
-    clip.parentEndpoints = std::make_pair(upperLeft.x, lowerRight.x);
-    Transformation temporalScaling;
-    temporalScaling.type = "temporal scaling";
-    temporalScaling.degree.x = m;
-    clip.transformations.push_back(temporalScaling);
-    deltaReport.push_back(clip);
     std::vector<int> frameX;
     std::vector<int> frameY;
     std::vector<float> avglumaA;
@@ -349,10 +342,35 @@ std::vector<std::pair<int, int> > align(cv::VideoCapture Va, cv::VideoCapture Vb
 	frameY.erase(frameY.end() - shift, frameY.end());
       }
     }
+    Clip clip;
+    clip.endpoints = std::make_pair(frameY[0], frameY[frameY.size()-1]);
+    clip.parentEndpoints = std::make_pair(frameX[0], frameX[frameX.size()-1]);
+    Transformation temporalScaling;
+    temporalScaling.type = "temporal scaling";
+    temporalScaling.degree.x = m;
+    clip.transformations.push_back(temporalScaling);
+    deltaReport.push_back(clip);
     for (int i = 0; i < frameX.size(); ++i) {
       framePairs.push_back(std::make_pair(frameX[i], frameY[i]));
     }
+    endpointsInParent.push_back(std::make_pair(frameX[0], frameX[frameX.size()-1]));
   }
+  Clip trimBegin;
+  trimBegin.parentEndpoints = std::make_pair(0, endpointsInParent[0].first);
+  Transformation temporalTrimming;
+  temporalTrimming.type = "temporal trimming";
+  trimBegin.transformations.push_back(temporalTrimming);
+  deltaReport.push_back(trimBegin);
+  for (int i = 0; i < endpointsInParent.size()-1; ++i) {
+    Clip clip;
+    clip.parentEndpoints = std::make_pair(endpointsInParent[i].second, endpointsInParent[i+1].first);
+    clip.transformations.push_back(temporalTrimming);
+    deltaReport.push_back(clip);
+  }
+  Clip trimEnd;
+  trimEnd.parentEndpoints = std::make_pair(endpointsInParent[endpointsInParent.size()-1].second, x);
+  trimEnd.transformations.push_back(temporalTrimming);
+  deltaReport.push_back(trimEnd);
   return framePairs;
 }
 
@@ -383,10 +401,10 @@ int main(int argc, char** argv) {
   for (Clip clip : deltaReport) {
     std::cout << " clip at [" << clip.endpoints.first << ", "
 	      << clip.endpoints.second << "]; in parent at ["
-	      << clip.parentEndpoints.first << "], "
-	      << clip.parentEndpoints.second << std::endl;
+	      << clip.parentEndpoints.first << ", "
+	      << clip.parentEndpoints.second << "]" << std::endl;
     for (Transformation transf : clip.transformations) {
-      std::cout << transf.type << " at position " << transf.position
+      std::cout << "  " << transf.type << " at position " << transf.position
 		<< " with degree " << transf.degree << std::endl;
     }
   }
