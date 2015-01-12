@@ -16,6 +16,20 @@
 
 const int DISTANCE_TAU = 16; // threshold for binarizing distance matrix
 
+struct Transformation {
+  std::string type;
+  cv::Point2i position; // top-left corner of local spatial transformation
+  cv::Point2f degree; // "degree" (may be length or factor) of transformation along each axis
+};
+
+struct Clip {
+  std::pair<int, int> endpoints; // start and end frame indices
+  std::pair<int, int> parentEndpoints; // start and end in parent
+  std::vector<Transformation> transformations;
+};
+
+std::vector<Clip> deltaReport;
+
 
 // get next block of 64 frames (overlapping with current block)
 void getBlock(cv::VideoCapture V, std::vector<cv::Mat>& block) {
@@ -244,14 +258,25 @@ std::vector<std::pair<int, int> > align(cv::VideoCapture Va, cv::VideoCapture Vb
 
   std::vector<std::pair<int, int> > framePairs;
   for (auto segment : matchingSegments) {
-    // TODO: use angular coefficient to estimate scaling
+    cv::Point2i upperLeft = std::get<0>(segment);
+    cv::Point2i lowerRight = std::get<1>(segment);
+    double m = std::get<2>(segment);
+    double b = std::get<3>(segment);
+    Clip clip;
+    clip.endpoints = std::make_pair(upperLeft.y, lowerRight.y);
+    clip.parentEndpoints = std::make_pair(upperLeft.x, lowerRight.x);
+    Transformation temporalScaling;
+    temporalScaling.type = "temporal scaling";
+    temporalScaling.degree.x = m;
+    clip.transformations.push_back(temporalScaling);
+    deltaReport.push_back(clip);
     std::vector<int> frameX;
     std::vector<int> frameY;
     std::vector<float> avglumaA;
     std::vector<float> avglumaB;
     int previousPy = -1;
-    for (int px = std::get<0>(segment).x; px < std::min(std::get<1>(segment).x+64, x); ++px) {
-      int py = std::get<2>(segment)*px+std::get<3>(segment);
+    for (int px = upperLeft.x; px < std::min(lowerRight.x+64, x); ++px) {
+      int py = m*px+b;
       if (py < 0 || py == previousPy) continue;
       if (py >= y) break;
       previousPy = py;
@@ -334,7 +359,17 @@ std::vector<std::pair<int, int> > align(cv::VideoCapture Va, cv::VideoCapture Vb
 
 void diff(cv::VideoCapture Va, cv::VideoCapture Vb, const std::vector<std::pair<int, int> >& framePairs) {
   for (auto p : framePairs) {
-    std::cout << p.first << ", " << p.second << std::endl;
+    // TODO: extract keyframes to lower processing
+    // (run detection only on keyframes)
+    Va.set(CV_CAP_PROP_POS_FRAMES, p.first);
+    Vb.set(CV_CAP_PROP_POS_FRAMES, p.second);
+    cv::Mat frame1;
+    bool flag1 = Va.read(frame1);
+    cv::Mat frame2;
+    bool flag2 = Vb.read(frame2);
+    if (flag1 && flag2) {
+      
+    }
   }
 }
 
@@ -344,4 +379,15 @@ int main(int argc, char** argv) {
   cv::VideoCapture Vb(argv[2]);
   std::vector<std::pair<int, int> > framePairs = align(Va, Vb);
   diff(Va, Vb, framePairs);
+  std::cout << "delta report:" << std::endl;
+  for (Clip clip : deltaReport) {
+    std::cout << " clip at [" << clip.endpoints.first << ", "
+	      << clip.endpoints.second << "]; in parent at ["
+	      << clip.parentEndpoints.first << "], "
+	      << clip.parentEndpoints.second << std::endl;
+    for (Transformation transf : clip.transformations) {
+      std::cout << transf.type << " at position " << transf.position
+		<< " with degree " << transf.degree << std::endl;
+    }
+  }
 }
