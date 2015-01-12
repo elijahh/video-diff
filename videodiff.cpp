@@ -310,6 +310,14 @@ std::vector<std::pair<int, int> > align(cv::VideoCapture Va, cv::VideoCapture Vb
       s1.at<float>(i-1) = avglumaA[i] - avglumaA[i-1];
       s2.at<float>(i-1) = avglumaB[i] - avglumaB[i-1];
     }
+    std::vector<int> keyframes;
+    keyframes.push_back(0);
+    for (int i = 1; i < s1.cols-1; ++i) { // extract keyframe positions from peaks
+      if (s1.at<float>(i) > s1.at<float>(i-1)
+	  && s1.at<float>(i) > s1.at<float>(i+1)) {
+	keyframes.push_back(i);
+      }
+    }
     cv::Mat correl1;
     cv::filter2D(s1, correl1, -1, s2);
     cv::Mat correl2;
@@ -350,7 +358,7 @@ std::vector<std::pair<int, int> > align(cv::VideoCapture Va, cv::VideoCapture Vb
     temporalScaling.degree.x = m;
     clip.transformations.push_back(temporalScaling);
     deltaReport.push_back(clip);
-    for (int i = 0; i < frameX.size(); ++i) {
+    for (auto i : keyframes) {
       framePairs.push_back(std::make_pair(frameX[i], frameY[i]));
     }
     endpointsInParent.push_back(std::make_pair(frameX[0], frameX[frameX.size()-1]));
@@ -377,8 +385,6 @@ std::vector<std::pair<int, int> > align(cv::VideoCapture Va, cv::VideoCapture Vb
 
 void diff(cv::VideoCapture Va, cv::VideoCapture Vb, const std::vector<std::pair<int, int> >& framePairs) {
   for (auto p : framePairs) {
-    // TODO: extract keyframes to lower processing
-    // (run detection only on keyframes)
     Va.set(CV_CAP_PROP_POS_FRAMES, p.first);
     Vb.set(CV_CAP_PROP_POS_FRAMES, p.second);
     cv::Mat frame1;
@@ -386,7 +392,7 @@ void diff(cv::VideoCapture Va, cv::VideoCapture Vb, const std::vector<std::pair<
     cv::Mat frame2;
     bool flag2 = Vb.read(frame2);
     if (flag1 && flag2) {
-      
+
     }
   }
 }
