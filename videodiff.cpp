@@ -494,6 +494,26 @@ void detectKeypoints(Clip& clip, cv::Mat& frame1, cv::Mat& frame2) {
     spatialScaling.degree = cv::Point2f((float) rect2Width / rect1Width, (float) rect2Height / rect1Height);
     clip.transformations.push_back(spatialScaling);
   }
+  cv::Mat region1 = frame1(cv::Rect(upperLeft1.x, upperLeft1.y, rect1Width, rect1Height));
+  cv::Mat region2 = frame2(cv::Rect(upperLeft2.x, upperLeft2.y, rect2Width, rect2Height));
+  cv::cvtColor(region1, region1, CV_BGR2YCrCb);
+  cv::cvtColor(region2, region2, CV_BGR2YCrCb);
+  cv::Mat mean1;
+  cv::Mat stddev1;
+  cv::meanStdDev(region1, mean1, stddev1);
+  cv::Mat mean2;
+  cv::Mat stddev2;
+  cv::meanStdDev(region2, mean2, stddev2);
+  double numerator1 = std::max(stddev1.at<double>(1), stddev2.at<double>(1));
+  double denominator1 = std::min(stddev1.at<double>(1), stddev2.at<double>(1));
+  double numerator2 = std::max(stddev1.at<double>(2), stddev2.at<double>(2));
+  double denominator2 = std::min(stddev1.at<double>(2), stddev2.at<double>(2));
+  if (numerator1/denominator1 > 2 || numerator2/denominator2 > 2) { // hardcoded critical value
+    Transformation colorAdjustment;
+    colorAdjustment.type = "color adjustment";
+    colorAdjustment.degree = cv::Point2f(mean2.at<double>(1) - mean1.at<double>(1), mean2.at<double>(2) - mean1.at<double>(2));
+    clip.transformations.push_back(colorAdjustment);
+  }
 }
 
 
