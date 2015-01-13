@@ -437,7 +437,7 @@ void detectAndCropBorders(Clip& clip, cv::Mat& frame1, cv::Mat& frame2) {
 }
 
 
-void detectAndCropKeypoints(Clip& clip, cv::Mat& frame1, cv::Mat& frame2) {
+void detectKeypoints(Clip& clip, cv::Mat& frame1, cv::Mat& frame2) {
   // keypoint matching
   cv::OrbFeatureDetector detector;
   std::vector<cv::KeyPoint> kp1, kp2;
@@ -488,6 +488,12 @@ void detectAndCropKeypoints(Clip& clip, cv::Mat& frame1, cv::Mat& frame2) {
     spatialCropping.degree = cv::Point2f(croppingFactorX2 / croppingFactorX1, croppingFactorY2 / croppingFactorY1);
     clip.transformations.push_back(spatialCropping);
   }
+  if (rect1Width != rect2Width || rect1Height != rect2Height) {
+    Transformation spatialScaling;
+    spatialScaling.type = "spatial scaling";
+    spatialScaling.degree = cv::Point2f((float) rect2Width / rect1Width, (float) rect2Height / rect1Height);
+    clip.transformations.push_back(spatialScaling);
+  }
 }
 
 
@@ -505,7 +511,7 @@ void diff(cv::VideoCapture Va, cv::VideoCapture Vb, const std::vector<std::pair<
       clip.endpoints = std::make_pair(p.second, framePairs[i+1].second);
       clip.parentEndpoints = std::make_pair(p.first, framePairs[i+1].first);
       detectAndCropBorders(clip, frame1, frame2);
-      detectAndCropKeypoints(clip, frame1, frame2);
+      detectKeypoints(clip, frame1, frame2);
       if (!clip.transformations.empty()) deltaReport.push_back(clip);
     }
   }
