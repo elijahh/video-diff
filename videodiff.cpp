@@ -432,8 +432,62 @@ void detectAndCropBorders(Clip& clip, cv::Mat& frame1, cv::Mat& frame2) {
     borderChange.degree = cv::Point2f(-borderXDelta, -borderYDelta);
     clip.transformations.push_back(borderChange);
   }
-  frame1 = frame1(cv::Rect(borderX1, borderY1, frame1.cols-borderX1, frame1.rows-borderY1));
-  frame2 = frame2(cv::Rect(borderX2, borderY2, frame2.cols-borderX2, frame2.rows-borderY2));
+  frame1 = frame1(cv::Rect(borderX1, borderY1, frame1.cols-2*borderX1, frame1.rows-2*borderY1));
+  frame2 = frame2(cv::Rect(borderX2, borderY2, frame2.cols-2*borderX2, frame2.rows-2*borderY2));
+}
+
+
+void detectAndCropKeypoints(Clip& clip, cv::Mat& frame1, cv::Mat& frame2) {
+  // keypoint matching
+  cv::OrbFeatureDetector detector;
+  std::vector<cv::KeyPoint> kp1, kp2;
+  detector.detect(frame1, kp1);
+  detector.detect(frame2, kp2);
+  cv::OrbDescriptorExtractor extractor;
+  cv::Mat des1, des2;
+  extractor.compute(frame1, kp1, des1);
+  extractor.compute(frame2, kp2, des2);
+  cv::FlannBasedMatcher matcher(new cv::flann::LshIndexParams(6, 12, 1), new cv::flann::SearchParams(50));
+  std::vector<std::vector<cv::DMatch> > matches;
+  matcher.knnMatch(des1, des2, matches, 2);
+  std::vector<cv::DMatch> good_matches;
+  for (int i = 0; i < des1.rows; i++) {
+    if (matches[i].size() == 2) { // ratio test
+      if (matches[i][0].distance <= 0.7*matches[i][1].distance) {
+	good_matches.push_back(matches[i][0]);
+      }
+    }
+  }
+
+  // crop to keypoints
+  cv::Point2i point1 = kp1[good_matches[0].queryIdx].pt;
+  cv::Point2i point2 = kp2[good_matches[0].trainIdx].pt;
+  cv::Point2i upperLeft1 = point1;
+  cv::Point2i lowerRight1 = point1;
+  cv::Point2i upperLeft2 = point2;
+  cv::Point2i lowerRight2 = point2;
+  for (auto m : good_matches) {
+    point1 = kp1[m.queryIdx].pt;
+    point2 = kp2[m.trainIdx].pt;
+    upperLeft1 = cv::Point2i(std::min(upperLeft1.x, point1.x), std::min(upperLeft1.y, point1.y));
+    lowerRight1 = cv::Point2i(std::max(lowerRight1.x, point1.x), std::max(lowerRight1.y, point1.y));
+    upperLeft2 = cv::Point2i(std::min(upperLeft2.x, point2.x), std::min(upperLeft2.y, point2.y));
+    lowerRight2 = cv::Point2i(std::max(lowerRight2.x, point2.x), std::max(lowerRight2.y, point2.y));
+  }
+  int rect1Width = lowerRight1.x - upperLeft1.x;
+  int rect1Height = lowerRight1.y - upperLeft1.y;
+  int rect2Width = lowerRight2.x - upperLeft2.x;
+  int rect2Height = lowerRight2.y - upperLeft2.y;
+  float croppingFactorX1 = (float) rect1Width / frame1.cols;
+  float croppingFactorY1 = (float) rect1Height / frame1.rows;
+  float croppingFactorX2 = (float) rect2Width / frame2.cols;
+  float croppingFactorY2 = (float) rect2Height / frame2.rows;
+  if (croppingFactorX1 != croppingFactorX2 || croppingFactorY1 != croppingFactorY2) {
+    Transformation spatialCropping;
+    spatialCropping.type = "spatial cropping";
+    spatialCropping.degree = cv::Point2f(croppingFactorX2 / croppingFactorX1, croppingFactorY2 / croppingFactorY1);
+    clip.transformations.push_back(spatialCropping);
+  }
 }
 
 
@@ -451,6 +505,7 @@ void diff(cv::VideoCapture Va, cv::VideoCapture Vb, const std::vector<std::pair<
       clip.endpoints = std::make_pair(p.second, framePairs[i+1].second);
       clip.parentEndpoints = std::make_pair(p.first, framePairs[i+1].first);
       detectAndCropBorders(clip, frame1, frame2);
+      detectAndCropKeypoints(clip, frame1, frame2);
       if (!clip.transformations.empty()) deltaReport.push_back(clip);
     }
   }
