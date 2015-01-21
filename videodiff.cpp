@@ -240,19 +240,10 @@ std::vector<std::pair<int, int> > align(cv::VideoCapture Va, cv::VideoCapture Vb
     double m = vy/vx;
     double b = py-m*px;
     cv::Point2i upperLeft = cv::Point2i(std::get<0>(boundaries[label]), m*std::get<0>(boundaries[label])+b);
-    if (m != 0) {
-      cv::Point2i upper = cv::Point2i((std::get<2>(boundaries[label])-b)/m, std::get<2>(boundaries[label]));
-      if (upper.x > std::get<0>(boundaries[label])) {
-	upperLeft = upper;
-      }
-    }
     cv::Point2i lowerRight = cv::Point2i(std::get<1>(boundaries[label]), m*std::get<1>(boundaries[label])+b);
-    if (m != 0) {
-      cv::Point2i lower = cv::Point2i((std::get<3>(boundaries[label])-b)/m, std::get<3>(boundaries[label]));
-      if (lower.x < std::get<1>(boundaries[label])) {
-	lowerRight = lower;
-      }
-    }
+    // recompute line parameters
+    m = (double) (lowerRight.y - upperLeft.y) / (lowerRight.x - upperLeft.x);
+    b = py-m*px;
     matchingSegments.push_back(std::make_tuple(upperLeft, lowerRight, m, b));
   }
 
@@ -310,15 +301,6 @@ std::vector<std::pair<int, int> > align(cv::VideoCapture Va, cv::VideoCapture Vb
       s1.at<float>(i-1) = avglumaA[i] - avglumaA[i-1];
       s2.at<float>(i-1) = avglumaB[i] - avglumaB[i-1];
     }
-    std::vector<int> keyframes;
-    keyframes.push_back(0);
-    for (int i = 1; i < s1.cols-1; ++i) { // extract keyframe positions from peaks
-      if (s1.at<float>(i) > s1.at<float>(i-1)
-	  && s1.at<float>(i) > s1.at<float>(i+1)) {
-	keyframes.push_back(i);
-      }
-    }
-    keyframes.push_back(frameX.size()-1);
     cv::Mat correl1;
     cv::filter2D(s1, correl1, -1, s2);
     cv::Mat correl2;
@@ -359,6 +341,33 @@ std::vector<std::pair<int, int> > align(cv::VideoCapture Va, cv::VideoCapture Vb
     temporalScaling.degree.x = m;
     clip.transformations.push_back(temporalScaling);
     deltaReport.push_back(clip);
+    std::vector<int> keyframes;
+    keyframes.push_back(0);
+    cv::Mat images[1];
+    Va.set(CV_CAP_PROP_POS_FRAMES, frameX[0]);
+    cv::Mat prevHist;
+    cv::Mat hist;
+    int channels[] = {0, 1, 2};
+    int histSize = 256;
+    float range[] = {0, 256};
+    const float* histRange = {range};
+    if (Va.read(images[0])) {
+      cv::calcHist(images, 1, channels, cv::Mat(), hist, 1, &histSize, &histRange);
+      cv::normalize(hist, hist, 0, 255, cv::NORM_MINMAX);
+    }
+    for (int i = 1; i < frameX.size(); ++i) {
+      prevHist = hist;
+      Va.set(CV_CAP_PROP_POS_FRAMES, frameX[i]);
+      if (Va.read(images[0])) {
+	cv::calcHist(images, 1, channels, cv::Mat(), hist, 1, &histSize, &histRange);
+	cv::normalize(hist, hist, 0, 255, cv::NORM_MINMAX);
+	double correlation = cv::compareHist(prevHist, hist, CV_COMP_CORREL);
+	if (correlation < 0.7) {
+	  keyframes.push_back(i);
+	}
+      }
+    }
+    keyframes.push_back(frameX.size()-1);
     for (auto i : keyframes) {
       framePairs.push_back(std::make_pair(frameX[i], frameY[i]));
     }
@@ -437,6 +446,26 @@ void detectAndCropBorders(Clip& clip, cv::Mat& frame1, cv::Mat& frame2) {
 }
 
 
+void compareBlocks(cv::Mat& region1, cv::Mat& region2) {
+  const int BLOCK_SIZE = 64;
+  std::pair<cv::Rect, double> maxdiff = std::make_pair(cv::Rect(0, 0, 0, 0), 0);
+  for (int i = 0; i < region1.cols / BLOCK_SIZE; ++i) {
+    for (int j = 0; j < region1.rows / BLOCK_SIZE; ++j) {
+      cv::Rect block = cv::Rect(i*BLOCK_SIZE, j*BLOCK_SIZE, BLOCK_SIZE, BLOCK_SIZE);
+      double diff = std::abs(cv::mean(region1(block))[0] - cv::mean(region2(block))[0]);
+      if (diff > maxdiff.second) {
+	maxdiff = std::make_pair(block, diff);
+      }
+    }
+  }
+  std::cout << "Max diff: " << maxdiff.first.x << ", " << maxdiff.first.y << ": " << maxdiff.second << std::endl;
+  cv::rectangle(region1, maxdiff.first, cv::Scalar(0, 0, 0));
+  cv::rectangle(region2, maxdiff.first, cv::Scalar(0, 0, 0));
+  cv::imshow("region1", region1);
+  cv::imshow("region2", region2);
+}
+
+
 void detectKeypoints(Clip& clip, cv::Mat& frame1, cv::Mat& frame2) {
   // keypoint matching
   cv::OrbFeatureDetector detector;
@@ -494,10 +523,12 @@ void detectKeypoints(Clip& clip, cv::Mat& frame1, cv::Mat& frame2) {
     spatialScaling.degree = cv::Point2f((float) rect2Width / rect1Width, (float) rect2Height / rect1Height);
     clip.transformations.push_back(spatialScaling);
   }
+
   cv::Mat region1 = frame1(cv::Rect(upperLeft1.x, upperLeft1.y, rect1Width, rect1Height));
   cv::Mat region2 = frame2(cv::Rect(upperLeft2.x, upperLeft2.y, rect2Width, rect2Height));
   cv::cvtColor(region1, region1, CV_BGR2YCrCb);
   cv::cvtColor(region2, region2, CV_BGR2YCrCb);
+
   cv::Mat mean1;
   cv::Mat stddev1;
   cv::meanStdDev(region1, mean1, stddev1);
@@ -514,6 +545,30 @@ void detectKeypoints(Clip& clip, cv::Mat& frame1, cv::Mat& frame2) {
     colorAdjustment.degree = cv::Point2f(mean2.at<double>(1) - mean1.at<double>(1), mean2.at<double>(2) - mean1.at<double>(2));
     clip.transformations.push_back(colorAdjustment);
   }
+
+  // scale to smaller region to compare
+  cv::Mat region1Scaled;
+  cv::Mat region2Scaled;
+  cv::Point2f scale1 = cv::Point2f(1, 1);
+  cv::Point2f scale2 = cv::Point2f(1, 1);
+  if (region1.cols < region2.cols || region1.rows < region2.rows) {
+    region1Scaled = region1;
+    cv::resize(region2, region2Scaled, cv::Size(region1.cols, region1.rows), 0, 0, CV_INTER_AREA);
+    scale2 = cv::Point2f((float) region1.cols / region2.cols, (float) region1.rows / region2.rows);
+  } else {
+    region2Scaled = region2;
+    cv::resize(region1, region1Scaled, cv::Size(region2.cols, region2.rows), 0, 0, CV_INTER_AREA);
+    scale1 = cv::Point2f((float) region2.cols / region1.cols, (float) region2.rows / region1.rows);
+  }
+  cv::Mat region1Channels[3];
+  cv::Mat region2Channels[3];
+  cv::split(region1Scaled, region1Channels);
+  cv::split(region2Scaled, region2Channels);
+  cv::Mat region1Gray = region1Channels[0];
+  cv::Mat region2Gray = region2Channels[0];
+  cv::equalizeHist(region1Gray, region1Gray);
+  cv::equalizeHist(region2Gray, region2Gray);
+  compareBlocks(region1Gray, region2Gray);
 }
 
 
@@ -530,8 +585,14 @@ void diff(cv::VideoCapture Va, cv::VideoCapture Vb, const std::vector<std::pair<
       Clip clip;
       clip.endpoints = std::make_pair(p.second, framePairs[i+1].second);
       clip.parentEndpoints = std::make_pair(p.first, framePairs[i+1].first);
+      cv::imshow("frame1", frame1);
+      cv::imshow("frame2", frame2);
+      cv::waitKey(0);
       detectAndCropBorders(clip, frame1, frame2);
       detectKeypoints(clip, frame1, frame2);
+      cv::imshow("frame1", frame1);
+      cv::imshow("frame2", frame2);
+      cv::waitKey(0);
       if (!clip.transformations.empty()) deltaReport.push_back(clip);
     }
   }
