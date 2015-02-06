@@ -275,24 +275,10 @@ std::vector<std::pair<int, int> > align(cv::VideoCapture Va, cv::VideoCapture Vb
 	frameY.push_back(py);
 	cv::Mat frame1Gray;
 	cv::cvtColor(frame1, frame1Gray, CV_BGR2GRAY);
-	int N = frame1Gray.rows*frame1Gray.cols;
-	float avgluma = 0;
-	for (int i = 0; i < frame1Gray.cols; ++i) {
-	  for (int j = 0; j < frame1Gray.rows; ++j) {
-	    avgluma += frame1Gray.at<uchar>(j, i)/(float)N;
-	  }
-	}
-	avglumaA.push_back(avgluma);
+	avglumaA.push_back((float)cv::mean(frame1Gray)[0]);
 	cv::Mat frame2Gray;
 	cv::cvtColor(frame2, frame2Gray, CV_BGR2GRAY);
-	N = frame2Gray.rows*frame2Gray.cols;
-	avgluma = 0;
-	for (int i = 0; i < frame2Gray.cols; ++i) {
-	  for (int j = 0; j < frame2Gray.rows; ++j) {
-	    avgluma += frame2Gray.at<uchar>(j, i)/(float)N;
-	  }
-	}
-	avglumaB.push_back(avgluma);
+	avglumaB.push_back((float)cv::mean(frame2Gray)[0]);
       }
     }
     cv::Mat s1(1, avglumaA.size()-1, CV_32F);
@@ -329,8 +315,8 @@ std::vector<std::pair<int, int> > align(cv::VideoCapture Va, cv::VideoCapture Vb
 	frameY.erase(frameY.begin(), frameY.begin() + shift);
 	frameX.erase(frameX.end() - shift, frameX.end());
       } else {
-	frameX.erase(frameX.begin(), frameX.begin() + shift);
-	frameY.erase(frameY.end() - shift, frameY.end());
+	frameX.erase(frameX.begin(), frameX.begin() - shift);
+	frameY.erase(frameY.end() + shift, frameY.end());
       }
     }
     Clip clip;
@@ -385,10 +371,12 @@ std::vector<std::pair<int, int> > align(cv::VideoCapture Va, cv::VideoCapture Vb
     clip.transformations.push_back(temporalTrimming);
     deltaReport.push_back(clip);
   }
-  Clip trimEnd;
-  trimEnd.parentEndpoints = std::make_pair(endpointsInParent[endpointsInParent.size()-1].second, x);
-  trimEnd.transformations.push_back(temporalTrimming);
-  deltaReport.push_back(trimEnd);
+  if (endpointsInParent[endpointsInParent.size()-1].second != x-1) {
+    Clip trimEnd;
+    trimEnd.parentEndpoints = std::make_pair(endpointsInParent[endpointsInParent.size()-1].second, x-1);
+    trimEnd.transformations.push_back(temporalTrimming);
+    deltaReport.push_back(trimEnd);
+  }
   return framePairs;
 }
 
@@ -446,23 +434,49 @@ void detectAndCropBorders(Clip& clip, cv::Mat& frame1, cv::Mat& frame2) {
 }
 
 
-void compareBlocks(cv::Mat& region1, cv::Mat& region2) {
-  const int BLOCK_SIZE = 64;
-  std::pair<cv::Rect, double> maxdiff = std::make_pair(cv::Rect(0, 0, 0, 0), 0);
+std::vector<Transformation> compareBlocks(cv::Mat& region1, cv::Mat& region2) {
+  const int BLOCK_SIZE = 32;
+  int BLOCK_AREA = BLOCK_SIZE*BLOCK_SIZE;
+  const double c_1 = 6.5025;  // (k1*L)^2 = (0.01*255)^2 -- k's are default constants
+  const double c_2 = 58.5225; // (k2*L)^2 = (0.03*255)^2 -- L is dynamic range
+  std::vector<Transformation> blockModifications;
   for (int i = 0; i < region1.cols / BLOCK_SIZE; ++i) {
     for (int j = 0; j < region1.rows / BLOCK_SIZE; ++j) {
       cv::Rect block = cv::Rect(i*BLOCK_SIZE, j*BLOCK_SIZE, BLOCK_SIZE, BLOCK_SIZE);
-      double diff = std::abs(cv::mean(region1(block))[0] - cv::mean(region2(block))[0]);
-      if (diff > maxdiff.second) {
-	maxdiff = std::make_pair(block, diff);
+      cv::Mat block1 = region1(block);
+      cv::Mat block2 = region2(block);
+      double mean_x = 0;
+      double mean_y = 0;
+      double variance_x = 0;
+      double variance_y = 0;
+      double covariance = 0;
+      for (int k = 0; k < BLOCK_SIZE; ++k) {
+	for (int l = 0; l < BLOCK_SIZE; ++l) {
+	  double x = block1.at<uchar>(l, k);
+	  double y = block2.at<uchar>(l, k);
+	  mean_x += x / BLOCK_AREA;
+	  mean_y += y / BLOCK_AREA;
+	  variance_x += x*x / BLOCK_AREA;
+	  variance_y += y*y / BLOCK_AREA;
+	  covariance += x*y / BLOCK_AREA;
+	}
+      }
+      double meansquare_x = mean_x*mean_x;
+      double meansquare_y = mean_y*mean_y;
+      variance_x -= meansquare_x;
+      variance_y -= meansquare_y;
+      covariance -= mean_x*mean_y;
+      double ssim = ((2*mean_x*mean_y + c_1)*(2*covariance + c_2)) / ((meansquare_x + meansquare_y + c_1)*(variance_x + variance_y + c_2));
+      if (ssim < 0.7) { // hardcoded SSIM threshold
+	Transformation blockModification;
+	blockModification.type = "block modification";
+	blockModification.position = cv::Point2i(i*BLOCK_SIZE, j*BLOCK_SIZE);
+	blockModification.degree = cv::Point2f(BLOCK_SIZE, BLOCK_SIZE);
+	blockModifications.push_back(blockModification);
       }
     }
   }
-  std::cout << "Max diff: " << maxdiff.first.x << ", " << maxdiff.first.y << ": " << maxdiff.second << std::endl;
-  cv::rectangle(region1, maxdiff.first, cv::Scalar(0, 0, 0));
-  cv::rectangle(region2, maxdiff.first, cv::Scalar(0, 0, 0));
-  cv::imshow("region1", region1);
-  cv::imshow("region2", region2);
+  return blockModifications;
 }
 
 
@@ -568,7 +582,8 @@ void detectKeypoints(Clip& clip, cv::Mat& frame1, cv::Mat& frame2) {
   cv::Mat region2Gray = region2Channels[0];
   cv::equalizeHist(region1Gray, region1Gray);
   cv::equalizeHist(region2Gray, region2Gray);
-  compareBlocks(region1Gray, region2Gray);
+  std::vector<Transformation> blockModifications = compareBlocks(region1Gray, region2Gray);
+  clip.transformations.insert(clip.transformations.end(), blockModifications.begin(), blockModifications.end());
 }
 
 
@@ -585,14 +600,8 @@ void diff(cv::VideoCapture Va, cv::VideoCapture Vb, const std::vector<std::pair<
       Clip clip;
       clip.endpoints = std::make_pair(p.second, framePairs[i+1].second);
       clip.parentEndpoints = std::make_pair(p.first, framePairs[i+1].first);
-      cv::imshow("frame1", frame1);
-      cv::imshow("frame2", frame2);
-      cv::waitKey(0);
       detectAndCropBorders(clip, frame1, frame2);
       detectKeypoints(clip, frame1, frame2);
-      cv::imshow("frame1", frame1);
-      cv::imshow("frame2", frame2);
-      cv::waitKey(0);
       if (!clip.transformations.empty()) deltaReport.push_back(clip);
     }
   }
