@@ -288,9 +288,9 @@ std::vector<std::pair<int, int> > align(cv::VideoCapture Va, cv::VideoCapture Vb
       s2.at<float>(i-1) = avglumaB[i] - avglumaB[i-1];
     }
     cv::Mat correl1;
-    cv::filter2D(s1, correl1, -1, s2);
+    cv::filter2D(s1, correl1, -1, s2, cv::Point2i(0, 0));
     cv::Mat correl2;
-    cv::filter2D(s2, correl2, -1, s1);
+    cv::filter2D(s2, correl2, -1, s1, cv::Point2i(0, 0));
     float max = correl1.at<float>(0);
     int shiftA = 0;
     for (int i = 1; i < correl1.cols; ++i) {
@@ -309,7 +309,7 @@ std::vector<std::pair<int, int> > align(cv::VideoCapture Va, cv::VideoCapture Vb
 	max = coeff;
       }
     }
-    int shift = (shiftB - shiftA) / 2;
+    int shift = shiftA + 1 - correl1.cols - shiftB;
     if (shift != 0) {
       if (shift > 0) {
 	frameY.erase(frameY.begin(), frameY.begin() + shift);
@@ -341,7 +341,7 @@ std::vector<std::pair<int, int> > align(cv::VideoCapture Va, cv::VideoCapture Vb
       cv::calcHist(images, 1, channels, cv::Mat(), hist, 1, &histSize, &histRange);
       cv::normalize(hist, hist, 0, 255, cv::NORM_MINMAX);
     }
-    for (int i = 1; i < frameX.size(); ++i) {
+    for (int i = 1; i < frameX.size()-1; ++i) {
       prevHist = hist;
       Va.set(CV_CAP_PROP_POS_FRAMES, frameX[i]);
       if (Va.read(images[0])) {
@@ -471,7 +471,7 @@ std::vector<Transformation> compareBlocks(cv::Mat& region1, cv::Mat& region2) {
 	Transformation blockModification;
 	blockModification.type = "block modification";
 	blockModification.position = cv::Point2i(i*BLOCK_SIZE, j*BLOCK_SIZE);
-	blockModification.degree = cv::Point2f(BLOCK_SIZE, BLOCK_SIZE);
+	blockModification.degree = cv::Point2f(BLOCK_SIZE, ssim);
 	blockModifications.push_back(blockModification);
       }
     }
