@@ -147,8 +147,8 @@ std::vector<std::pair<int, int> > align(cv::VideoCapture Va, cv::VideoCapture Vb
   }
 
   // apply morphological opening
-  cv::Mat elementErosion = cv::getStructuringElement(cv::MORPH_RECT, cv::Size(3, 3), cv::Point(-1, -1));
-  cv::Mat elementDilation = cv::getStructuringElement(cv::MORPH_RECT, cv::Size(30, 30), cv::Point(-1, -1));
+  cv::Mat elementErosion = cv::getStructuringElement(cv::MORPH_RECT, cv::Size(8, 8), cv::Point(-1, -1));
+  cv::Mat elementDilation = cv::getStructuringElement(cv::MORPH_RECT, cv::Size(50, 50), cv::Point(-1, -1));
   cv::Mat distancesBinarizedTemp;
   cv::erode(distancesBinarized, distancesBinarizedTemp, elementErosion);
   cv::dilate(distancesBinarizedTemp, distancesBinarized, elementDilation);
@@ -156,6 +156,8 @@ std::vector<std::pair<int, int> > align(cv::VideoCapture Va, cv::VideoCapture Vb
   // label connected components
   int currentLabel = 1;
   std::vector<std::pair<int, int> > pixelQueue;
+  std::vector<std::vector<cv::Point2i> > connectedComponents;
+  connectedComponents.push_back(std::vector<cv::Point2i>());
   cv::Mat distancesLabeled(y, x, CV_32S, cv::Scalar(0));
   for (int i = 0; i < x; ++i) {
     for (int j = 0; j < y; ++j) {
@@ -173,6 +175,7 @@ std::vector<std::pair<int, int> > align(cv::VideoCapture Va, cv::VideoCapture Vb
 	      if (m >= 0 && m < x && n >= 0 && n < y) {
 		if (distancesLabeled.at<int>(n, m) == 0 && distancesBinarized.at<uchar>(n, m) == 1) {
 		  distancesLabeled.at<int>(n, m) = currentLabel;
+		  connectedComponents.back().push_back(cv::Point2i(m, n));
 		  pixelQueue.push_back(std::make_pair(n, m));
 		}
 	      }
@@ -180,6 +183,7 @@ std::vector<std::pair<int, int> > align(cv::VideoCapture Va, cv::VideoCapture Vb
 	  }
 	}
 	++currentLabel;
+	connectedComponents.push_back(std::vector<cv::Point2i>());
       }
     }
   }
@@ -187,44 +191,40 @@ std::vector<std::pair<int, int> > align(cv::VideoCapture Va, cv::VideoCapture Vb
   // find distance minima for rows and columns of components
   std::vector<std::vector<cv::Point2i> > minima;
   std::vector<std::tuple<int, int, int, int> > boundaries;
-  for (int label = 1; label < currentLabel; ++label) {
-    std::vector<cv::Point2i> minimaLabel;
+  for (auto component : connectedComponents) {
+    std::map<int, int> minRowCoord;
+    std::map<int, int> minRowDist;
+    std::map<int, int> minColumnCoord;
+    std::map<int, int> minColumnDist;
     std::tuple<int, int, int, int> boundariesLabel = std::make_tuple(x, 0, y, 0); // left, right, upper, lower
-    for (int i = 0; i < x; ++i) {
-      int minColumn = DISTANCE_TAU;
-      cv::Point2i minCoords(-1, -1);
-      for (int j = 0; j < y; ++j) {
-	if (distancesLabeled.at<int>(j, i) == label) {
-	  boundariesLabel = std::make_tuple(std::min(i, std::get<0>(boundariesLabel)), std::max(i, std::get<1>(boundariesLabel)), std::min(j, std::get<2>(boundariesLabel)), std::max(j, std::get<3>(boundariesLabel)));
-	  int dist = distances.at<uchar>(j, i);
-	  if (dist <= minColumn) {
-	    minColumn = dist;
-	    minCoords = cv::Point2i(i, j);
-	  }
-	}
+    for (auto point : component) {
+      int i = point.x;
+      int j = point.y;
+      boundariesLabel = std::make_tuple(std::min(i, std::get<0>(boundariesLabel)), std::max(i, std::get<1>(boundariesLabel)), std::min(j, std::get<2>(boundariesLabel)), std::max(j, std::get<3>(boundariesLabel)));
+      int dist = distances.at<uchar>(j, i);
+      if (minRowDist.find(j) == minRowDist.end()) {
+	minRowDist[j] = dist;
+	minRowCoord[j] = i;
+      } else if (dist <= minRowDist[j]) {
+	minRowDist[j] = dist;
+	minRowCoord[j] = i;
       }
-      if (minCoords.x != -1 || minCoords.y != -1) {
-	minimaLabel.push_back(minCoords);
-      }
-    }
-    for (int j = 0; j < y; ++j) {
-      int minRow = DISTANCE_TAU;
-      cv::Point2i minCoords(-1, -1);
-      for (int i = 0; i < x; ++i) {
-	if (distancesLabeled.at<int>(j, i) == label) {
-	  int dist = distances.at<uchar>(j, i);
-	  if (dist <= minRow) {
-	    minRow = dist;
-	    minCoords = cv::Point2i(i, j);
-	  }
-	}
-      }
-      if (minCoords.x != -1 || minCoords.y != -1) {
-	minimaLabel.push_back(minCoords);
+      if (minColumnDist.find(i) == minColumnDist.end()) {
+	minColumnDist[i] = dist;
+	minColumnCoord[i] = j;
+      } else if (dist <= minColumnDist[i]) {
+	minColumnDist[i] = dist;
+	minColumnCoord[i] = j;
       }
     }
-    minima.push_back(minimaLabel);
     boundaries.push_back(boundariesLabel);
+    minima.push_back(std::vector<cv::Point2i>());
+    for (auto iter = minRowCoord.begin(); iter != minRowCoord.end(); ++iter) {
+      minima.back().push_back(cv::Point2i(iter->second, iter->first));
+    }
+    for (auto iter = minColumnCoord.begin(); iter != minColumnCoord.end(); ++iter) {
+      minima.back().push_back(cv::Point2i(iter->first, iter->second));
+    }
   }
 
   // fit line through minima for each component
@@ -256,8 +256,6 @@ std::vector<std::pair<int, int> > align(cv::VideoCapture Va, cv::VideoCapture Vb
     double b = std::get<3>(segment);
     std::vector<int> frameX;
     std::vector<int> frameY;
-    std::vector<float> avglumaA;
-    std::vector<float> avglumaB;
     int previousPy = -1;
     for (int px = upperLeft.x; px < std::min(lowerRight.x+64, x); ++px) {
       int py = m*px+b;
@@ -275,50 +273,11 @@ std::vector<std::pair<int, int> > align(cv::VideoCapture Va, cv::VideoCapture Vb
 	frameY.push_back(py);
 	cv::Mat frame1Gray;
 	cv::cvtColor(frame1, frame1Gray, CV_BGR2GRAY);
-	avglumaA.push_back((float)cv::mean(frame1Gray)[0]);
 	cv::Mat frame2Gray;
 	cv::cvtColor(frame2, frame2Gray, CV_BGR2GRAY);
-	avglumaB.push_back((float)cv::mean(frame2Gray)[0]);
       }
     }
-    cv::Mat s1(1, avglumaA.size()-1, CV_32F);
-    cv::Mat s2(1, avglumaB.size()-1, CV_32F);
-    for (int i = 1; i < avglumaA.size(); ++i) {
-      s1.at<float>(i-1) = avglumaA[i] - avglumaA[i-1];
-      s2.at<float>(i-1) = avglumaB[i] - avglumaB[i-1];
-    }
-    cv::Mat correl1;
-    cv::filter2D(s1, correl1, -1, s2, cv::Point2i(0, 0));
-    cv::Mat correl2;
-    cv::filter2D(s2, correl2, -1, s1, cv::Point2i(0, 0));
-    float max = correl1.at<float>(0);
-    int shiftA = 0;
-    for (int i = 1; i < correl1.cols; ++i) {
-      float coeff = correl1.at<float>(i);
-      if (coeff > max) {
-	shiftA = i;
-	max = coeff;
-      }
-    }
-    max = correl2.at<float>(0);
-    int shiftB = 0;
-    for (int i = 1; i < correl2.cols; ++i) {
-      float coeff = correl2.at<float>(i);
-      if (coeff > max) {
-	shiftB = i;
-	max = coeff;
-      }
-    }
-    int shift = shiftA + 1 - correl1.cols - shiftB;
-    if (shift != 0) {
-      if (shift > 0) {
-	frameY.erase(frameY.begin(), frameY.begin() + shift);
-	frameX.erase(frameX.end() - shift, frameX.end());
-      } else {
-	frameX.erase(frameX.begin(), frameX.begin() - shift);
-	frameY.erase(frameY.end() + shift, frameY.end());
-      }
-    }
+
     Clip clip;
     clip.endpoints = std::make_pair(frameY[0], frameY[frameY.size()-1]);
     clip.parentEndpoints = std::make_pair(frameX[0], frameX[frameX.size()-1]);
