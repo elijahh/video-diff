@@ -461,6 +461,8 @@ void detectKeypoints(Clip& clip, cv::Mat& frame1, cv::Mat& frame2) {
     }
   }
 
+  if (good_matches.empty()) return; // can't proceed with comparison if frames don't match
+
   // crop to keypoints
   cv::Point2i point1 = kp1[good_matches[0].queryIdx].pt;
   cv::Point2i point2 = kp2[good_matches[0].trainIdx].pt;
