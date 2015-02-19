@@ -247,6 +247,21 @@ std::vector<std::pair<int, int> > align(cv::VideoCapture Va, cv::VideoCapture Vb
     matchingSegments.push_back(std::make_tuple(upperLeft, lowerRight, m, b));
   }
 
+  // if a segment contains all frames of another segment, only keep longer one
+  for (std::vector<std::tuple<cv::Point2i, cv::Point2i, double, double> >::iterator segment = matchingSegments.begin(); segment != matchingSegments.end();) {
+    bool dropSegment = false;
+    for (std::vector<std::tuple<cv::Point2i, cv::Point2i, double, double> >::iterator otherSegment = matchingSegments.begin(); otherSegment != matchingSegments.end(); ++otherSegment) {
+      if (segment != otherSegment &&
+	  std::get<0>(*otherSegment).y <= std::get<0>(*segment).y &&
+	  std::get<1>(*segment).y <= std::get<1>(*otherSegment).y) {
+	segment = matchingSegments.erase(segment);
+	dropSegment = true;
+	break;
+      }
+    }
+    if (!dropSegment) ++segment;
+  }
+
   std::vector<std::pair<int, int> > framePairs;
   std::vector<std::pair<int, int> > endpointsInParent;
   for (auto segment : matchingSegments) {
@@ -347,8 +362,11 @@ int getBorderSize(cv::Mat frame, bool x) {
   if (x) frame = frame.t();
   for (int i = 0; i < frame.rows / 2; ++i) {
     for (int j = 0; j < frame.cols; ++j) {
-      if (frame.at<cv::Vec3b>(i, j) != color
-	  || frame.at<cv::Vec3b>(frame.rows-i-1, j) != color) {
+      cv::Vec3b diff1 = frame.at<cv::Vec3b>(i, j) - color;
+      cv::Vec3b diff2 = frame.at<cv::Vec3b>(frame.rows-i-1, j) - color;
+      if (std::abs(diff1.val[0]) > 5 || std::abs(diff1.val[1]) > 5
+	  || std::abs(diff1.val[2]) > 5 || std::abs(diff2.val[0]) > 5
+	  || std::abs(diff2.val[1]) > 5 || std::abs(diff2.val[2]) > 5) {
 	endBorder = true;
       }
     }
@@ -450,18 +468,21 @@ void detectKeypoints(Clip& clip, cv::Mat& frame1, cv::Mat& frame2) {
   extractor.compute(frame1, kp1, des1);
   extractor.compute(frame2, kp2, des2);
   cv::FlannBasedMatcher matcher(new cv::flann::LshIndexParams(6, 12, 1), new cv::flann::SearchParams(50));
-  std::vector<std::vector<cv::DMatch> > matches;
-  matcher.knnMatch(des1, des2, matches, 2);
+  std::vector<cv::DMatch> matches1;
+  std::vector<cv::DMatch> matches2;
+  matcher.match(des1, des2, matches1);
+  matcher.match(des2, des1, matches2);
   std::vector<cv::DMatch> good_matches;
-  for (int i = 0; i < des1.rows; i++) {
-    if (matches[i].size() == 2) { // ratio test
-      if (matches[i][0].distance <= 0.7*matches[i][1].distance) {
-	good_matches.push_back(matches[i][0]);
+  for (std::vector<cv::DMatch>::const_iterator iter1 = matches1.begin(); iter1 != matches1.end(); ++iter1) {
+    for (std::vector<cv::DMatch>::const_iterator iter2 = matches2.begin(); iter2 != matches2.end(); ++iter2) {
+      if ((*iter1).queryIdx == (*iter2).trainIdx && (*iter2).queryIdx == (*iter1).trainIdx) {
+	good_matches.push_back(*iter1);
+	break;
       }
     }
   }
-
-  if (good_matches.empty()) return; // can't proceed with comparison if frames don't match
+  
+  if (good_matches.size() < 4) return; // can't proceed with comparison if frames don't match
 
   // crop to keypoints
   cv::Point2i point1 = kp1[good_matches[0].queryIdx].pt;
@@ -473,10 +494,12 @@ void detectKeypoints(Clip& clip, cv::Mat& frame1, cv::Mat& frame2) {
   for (auto m : good_matches) {
     point1 = kp1[m.queryIdx].pt;
     point2 = kp2[m.trainIdx].pt;
-    upperLeft1 = cv::Point2i(std::min(upperLeft1.x, point1.x), std::min(upperLeft1.y, point1.y));
-    lowerRight1 = cv::Point2i(std::max(lowerRight1.x, point1.x), std::max(lowerRight1.y, point1.y));
-    upperLeft2 = cv::Point2i(std::min(upperLeft2.x, point2.x), std::min(upperLeft2.y, point2.y));
-    lowerRight2 = cv::Point2i(std::max(lowerRight2.x, point2.x), std::max(lowerRight2.y, point2.y));
+    int size1 = 0; // (int) kp1[m.queryIdx].size;
+    int size2 = 0; // (int) kp2[m.trainIdx].size;
+    upperLeft1 = cv::Point2i(std::max(std::min(upperLeft1.x, point1.x - size1), 0), std::max(std::min(upperLeft1.y, point1.y - size1), 0));
+    lowerRight1 = cv::Point2i(std::min(frame1.cols-1, std::max(lowerRight1.x, point1.x + size1)), std::min(frame1.rows-1, std::max(lowerRight1.y, point1.y + size1)));
+    upperLeft2 = cv::Point2i(std::max(std::min(upperLeft2.x, point2.x - size2), 0), std::max(std::min(upperLeft2.y, point2.y - size2), 0));
+    lowerRight2 = cv::Point2i(std::min(frame2.cols-1, std::max(lowerRight2.x, point2.x + size2)), std::min(frame2.rows-1, std::max(lowerRight2.y, point2.y + size2)));
   }
   int rect1Width = lowerRight1.x - upperLeft1.x;
   int rect1Height = lowerRight1.y - upperLeft1.y;
@@ -521,28 +544,15 @@ void detectKeypoints(Clip& clip, cv::Mat& frame1, cv::Mat& frame2) {
     clip.transformations.push_back(colorAdjustment);
   }
 
-  // scale to smaller region to compare
+  // resize region1 to region2 to compare
   cv::Mat region1Scaled;
-  cv::Mat region2Scaled;
-  cv::Point2f scale1 = cv::Point2f(1, 1);
-  cv::Point2f scale2 = cv::Point2f(1, 1);
-  if (region1.cols < region2.cols || region1.rows < region2.rows) {
-    region1Scaled = region1;
-    cv::resize(region2, region2Scaled, cv::Size(region1.cols, region1.rows), 0, 0, CV_INTER_AREA);
-    scale2 = cv::Point2f((float) region1.cols / region2.cols, (float) region1.rows / region2.rows);
-  } else {
-    region2Scaled = region2;
-    cv::resize(region1, region1Scaled, cv::Size(region2.cols, region2.rows), 0, 0, CV_INTER_AREA);
-    scale1 = cv::Point2f((float) region2.cols / region1.cols, (float) region2.rows / region1.rows);
-  }
+  cv::resize(region1, region1Scaled, cv::Size(region2.cols, region2.rows), 0, 0, CV_INTER_AREA);
   cv::Mat region1Channels[3];
   cv::Mat region2Channels[3];
   cv::split(region1Scaled, region1Channels);
-  cv::split(region2Scaled, region2Channels);
+  cv::split(region2, region2Channels);
   cv::Mat region1Gray = region1Channels[0];
   cv::Mat region2Gray = region2Channels[0];
-  cv::equalizeHist(region1Gray, region1Gray);
-  cv::equalizeHist(region2Gray, region2Gray);
   std::vector<Transformation> blockModifications = compareBlocks(region1Gray, region2Gray);
   clip.transformations.insert(clip.transformations.end(), blockModifications.begin(), blockModifications.end());
 }
