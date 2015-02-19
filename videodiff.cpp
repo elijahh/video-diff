@@ -15,6 +15,8 @@
 #include <opencv2/highgui/highgui.hpp>
 
 const int DISTANCE_TAU = 16; // threshold for binarizing distance matrix
+const int BLOCK_SIZE = 32; // standard block size to compare between frames
+const float SSIM_THRESHOLD = 0.9; // threshold for structural similarity of blocks
 
 struct Transformation {
   std::string type;
@@ -411,15 +413,14 @@ void detectAndCropBorders(Clip& clip, cv::Mat& frame1, cv::Mat& frame2) {
 }
 
 
-std::vector<Transformation> compareBlocks(cv::Mat& region1, cv::Mat& region2) {
-  const int BLOCK_SIZE = 32;
-  int BLOCK_AREA = BLOCK_SIZE*BLOCK_SIZE;
+std::vector<Transformation> compareBlocks(cv::Mat& region1, cv::Mat& region2, const int blockSize) {
+  int BLOCK_AREA = blockSize*blockSize;
   const double c_1 = 6.5025;  // (k1*L)^2 = (0.01*255)^2 -- k's are default constants
   const double c_2 = 58.5225; // (k2*L)^2 = (0.03*255)^2 -- L is dynamic range
   std::vector<Transformation> blockModifications;
-  for (int i = 0; i < region1.cols / BLOCK_SIZE; ++i) {
-    for (int j = 0; j < region1.rows / BLOCK_SIZE; ++j) {
-      cv::Rect block = cv::Rect(i*BLOCK_SIZE, j*BLOCK_SIZE, BLOCK_SIZE, BLOCK_SIZE);
+  for (int i = 0; i < region1.cols / blockSize; ++i) {
+    for (int j = 0; j < region1.rows / blockSize; ++j) {
+      cv::Rect block = cv::Rect(i*blockSize, j*blockSize, blockSize, blockSize);
       cv::Mat block1 = region1(block);
       cv::Mat block2 = region2(block);
       double mean_x = 0;
@@ -427,8 +428,8 @@ std::vector<Transformation> compareBlocks(cv::Mat& region1, cv::Mat& region2) {
       double variance_x = 0;
       double variance_y = 0;
       double covariance = 0;
-      for (int k = 0; k < BLOCK_SIZE; ++k) {
-	for (int l = 0; l < BLOCK_SIZE; ++l) {
+      for (int k = 0; k < blockSize; ++k) {
+	for (int l = 0; l < blockSize; ++l) {
 	  double x = block1.at<uchar>(l, k);
 	  double y = block2.at<uchar>(l, k);
 	  mean_x += x / BLOCK_AREA;
@@ -444,11 +445,11 @@ std::vector<Transformation> compareBlocks(cv::Mat& region1, cv::Mat& region2) {
       variance_y -= meansquare_y;
       covariance -= mean_x*mean_y;
       double ssim = ((2*mean_x*mean_y + c_1)*(2*covariance + c_2)) / ((meansquare_x + meansquare_y + c_1)*(variance_x + variance_y + c_2));
-      if (ssim < 0.7) { // hardcoded SSIM threshold
+      if (ssim < SSIM_THRESHOLD) {
 	Transformation blockModification;
 	blockModification.type = "block modification";
-	blockModification.position = cv::Point2i(i*BLOCK_SIZE, j*BLOCK_SIZE);
-	blockModification.degree = cv::Point2f(BLOCK_SIZE, ssim);
+	blockModification.position = cv::Point2i(i*blockSize, j*blockSize);
+	blockModification.degree = cv::Point2f(blockSize, ssim);
 	blockModifications.push_back(blockModification);
       }
     }
@@ -553,7 +554,9 @@ void detectKeypoints(Clip& clip, cv::Mat& frame1, cv::Mat& frame2) {
   cv::split(region2, region2Channels);
   cv::Mat region1Gray = region1Channels[0];
   cv::Mat region2Gray = region2Channels[0];
-  std::vector<Transformation> blockModifications = compareBlocks(region1Gray, region2Gray);
+  std::vector<Transformation> checkFramesMatch = compareBlocks(region1Gray, region2Gray, std::min(region1Gray.cols, region1Gray.rows));
+  if (!checkFramesMatch.empty()) return;
+  std::vector<Transformation> blockModifications = compareBlocks(region1Gray, region2Gray, 32);
   clip.transformations.insert(clip.transformations.end(), blockModifications.begin(), blockModifications.end());
 }
 
