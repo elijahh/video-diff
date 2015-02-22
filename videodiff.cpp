@@ -13,6 +13,7 @@
 
 #include <opencv2/opencv.hpp>
 #include <opencv2/highgui/highgui.hpp>
+#include <opencv2/nonfree/nonfree.hpp>
 
 const int DISTANCE_TAU = 16; // threshold for binarizing distance matrix
 const int BLOCK_SIZE = 32; // standard block size to compare between frames
@@ -414,6 +415,9 @@ void detectAndCropBorders(Clip& clip, cv::Mat& frame1, cv::Mat& frame2) {
 
 
 std::vector<Transformation> compareBlocks(cv::Mat& region1, cv::Mat& region2, const int blockSize) {
+  cv::imshow("region1", region1);
+  cv::imshow("region2", region2);
+  cv::waitKey();
   int BLOCK_AREA = blockSize*blockSize;
   const double c_1 = 6.5025;  // (k1*L)^2 = (0.01*255)^2 -- k's are default constants
   const double c_2 = 58.5225; // (k2*L)^2 = (0.03*255)^2 -- L is dynamic range
@@ -445,6 +449,7 @@ std::vector<Transformation> compareBlocks(cv::Mat& region1, cv::Mat& region2, co
       variance_y -= meansquare_y;
       covariance -= mean_x*mean_y;
       double ssim = ((2*mean_x*mean_y + c_1)*(2*covariance + c_2)) / ((meansquare_x + meansquare_y + c_1)*(variance_x + variance_y + c_2));
+      std::cout << "ssim = " << ssim << " ";
       if (ssim < SSIM_THRESHOLD) {
 	Transformation blockModification;
 	blockModification.type = "block modification";
@@ -454,34 +459,43 @@ std::vector<Transformation> compareBlocks(cv::Mat& region1, cv::Mat& region2, co
       }
     }
   }
+  std::cout << "; blockModifications.size() = " << blockModifications.size() << std::endl;
   return blockModifications;
 }
 
 
 void detectKeypoints(Clip& clip, cv::Mat& frame1, cv::Mat& frame2) {
   // keypoint matching
-  cv::OrbFeatureDetector detector;
+  cv::SurfFeatureDetector detector;
   std::vector<cv::KeyPoint> kp1, kp2;
   detector.detect(frame1, kp1);
   detector.detect(frame2, kp2);
-  cv::OrbDescriptorExtractor extractor;
+  cv::SurfDescriptorExtractor extractor;
   cv::Mat des1, des2;
   extractor.compute(frame1, kp1, des1);
   extractor.compute(frame2, kp2, des2);
-  cv::FlannBasedMatcher matcher(new cv::flann::LshIndexParams(6, 12, 1), new cv::flann::SearchParams(50));
-  std::vector<cv::DMatch> matches1;
-  std::vector<cv::DMatch> matches2;
-  matcher.match(des1, des2, matches1);
-  matcher.match(des2, des1, matches2);
+  cv::FlannBasedMatcher matcher;
+  std::vector<std::vector<cv::DMatch> > matches;
+  //  std::vector<cv::DMatch> matches2;
+  matcher.knnMatch(des1, des2, matches, 2);
+  //matcher.match(des1, des2, matches1);
+  //matcher.match(des2, des1, matches2);
   std::vector<cv::DMatch> good_matches;
-  for (std::vector<cv::DMatch>::const_iterator iter1 = matches1.begin(); iter1 != matches1.end(); ++iter1) {
+  for (int i = 0; i < des1.rows; i++) {
+    if (matches[i].size() == 2) { // ratio test
+      if (matches[i][0].distance <= 0.7*matches[i][1].distance) {
+	good_matches.push_back(matches[i][0]);
+      }
+    }
+  }
+  /*for (std::vector<cv::DMatch>::const_iterator iter1 = matches1.begin(); iter1 != matches1.end(); ++iter1) {
     for (std::vector<cv::DMatch>::const_iterator iter2 = matches2.begin(); iter2 != matches2.end(); ++iter2) {
       if ((*iter1).queryIdx == (*iter2).trainIdx && (*iter2).queryIdx == (*iter1).trainIdx) {
 	good_matches.push_back(*iter1);
 	break;
       }
     }
-  }
+    }*/
   
   if (good_matches.size() < 4) return; // can't proceed with comparison if frames don't match
 
@@ -495,8 +509,8 @@ void detectKeypoints(Clip& clip, cv::Mat& frame1, cv::Mat& frame2) {
   for (auto m : good_matches) {
     point1 = kp1[m.queryIdx].pt;
     point2 = kp2[m.trainIdx].pt;
-    int size1 = 0; // (int) kp1[m.queryIdx].size;
-    int size2 = 0; // (int) kp2[m.trainIdx].size;
+    int size1 = (int) kp1[m.queryIdx].size;
+    int size2 = (int) kp2[m.trainIdx].size;
     upperLeft1 = cv::Point2i(std::max(std::min(upperLeft1.x, point1.x - size1), 0), std::max(std::min(upperLeft1.y, point1.y - size1), 0));
     lowerRight1 = cv::Point2i(std::min(frame1.cols-1, std::max(lowerRight1.x, point1.x + size1)), std::min(frame1.rows-1, std::max(lowerRight1.y, point1.y + size1)));
     upperLeft2 = cv::Point2i(std::max(std::min(upperLeft2.x, point2.x - size2), 0), std::max(std::min(upperLeft2.y, point2.y - size2), 0));
@@ -556,7 +570,7 @@ void detectKeypoints(Clip& clip, cv::Mat& frame1, cv::Mat& frame2) {
   cv::Mat region2Gray = region2Channels[0];
   std::vector<Transformation> checkFramesMatch = compareBlocks(region1Gray, region2Gray, std::min(region1Gray.cols, region1Gray.rows));
   if (!checkFramesMatch.empty()) return;
-  std::vector<Transformation> blockModifications = compareBlocks(region1Gray, region2Gray, 32);
+  std::vector<Transformation> blockModifications = compareBlocks(region1Gray, region2Gray, BLOCK_SIZE);
   clip.transformations.insert(clip.transformations.end(), blockModifications.begin(), blockModifications.end());
 }
 
