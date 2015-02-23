@@ -11,6 +11,7 @@
 //  Temporal - scaling, cropping
 //
 
+#include <ctime>
 #include <opencv2/opencv.hpp>
 #include <opencv2/highgui/highgui.hpp>
 #include <opencv2/nonfree/nonfree.hpp>
@@ -128,10 +129,19 @@ int distance(const std::vector<int>& blockA, const std::vector<int>& blockB) {
 
 // return pairs of matching frames [indices] between Va and Vb for comparison
 std::vector<std::pair<int, int> > align(cv::VideoCapture Va, cv::VideoCapture Vb) {
+  std::time_t starttime = std::time(nullptr);
   // split into blocks of 64 frames and get 3D DCT hash of each block
   std::vector<std::vector<int> > blocksVa = hashesOfBlocks(Va);
+  std::time_t endtime = std::time(nullptr);
+  std::cout << "Total number of blocks in Va: " << blocksVa.size()
+	    << "; time to hash: " << (endtime-starttime) << std::endl;
+  std::time(&starttime);
   std::vector<std::vector<int> > blocksVb = hashesOfBlocks(Vb);
+  std::time(&endtime);
+  std::cout << "Total number of blocks in Vb: " << blocksVb.size()
+	    << "; time to hash: " << (endtime-starttime) << std::endl;
 
+  std::time(&starttime);
   // compare pair-wise Hamming distance between each block
   int x = blocksVa.size();
   int y = blocksVb.size();
@@ -148,14 +158,20 @@ std::vector<std::pair<int, int> > align(cv::VideoCapture Va, cv::VideoCapture Vb
       }
     }
   }
+  std::time(&endtime);
+  std::cout << "Time to compute distance matrix and binarize: " << (endtime-starttime) << std::endl;
 
+  std::time(&starttime);
   // apply morphological opening
   cv::Mat elementErosion = cv::getStructuringElement(cv::MORPH_RECT, cv::Size(8, 8), cv::Point(-1, -1));
   cv::Mat elementDilation = cv::getStructuringElement(cv::MORPH_RECT, cv::Size(50, 50), cv::Point(-1, -1));
   cv::Mat distancesBinarizedTemp;
   cv::erode(distancesBinarized, distancesBinarizedTemp, elementErosion);
   cv::dilate(distancesBinarizedTemp, distancesBinarized, elementDilation);
+  std::time(&endtime);
+  std::cout << "Time to apply morphological opening: " << (endtime-starttime) << std::endl;
 
+  std::time(&starttime);
   // label connected components
   int currentLabel = 1;
   std::vector<std::pair<int, int> > pixelQueue;
@@ -190,7 +206,11 @@ std::vector<std::pair<int, int> > align(cv::VideoCapture Va, cv::VideoCapture Vb
       }
     }
   }
+  std::time(&endtime);
+  std::cout << "Total number of connected components: " << connectedComponents.size()
+	    << "; time to discover: " << (endtime-starttime) << std::endl;
 
+  std::time(&starttime);
   // find distance minima for rows and columns of components
   std::vector<std::vector<cv::Point2i> > minima;
   std::vector<std::tuple<int, int, int, int> > boundaries;
@@ -229,7 +249,10 @@ std::vector<std::pair<int, int> > align(cv::VideoCapture Va, cv::VideoCapture Vb
       minima.back().push_back(cv::Point2i(iter->first, iter->second));
     }
   }
+  std::time(&endtime);
+  std::cout << "Time to find distance minima for all components: " << (endtime-starttime) << std::endl;
 
+  std::time(&starttime);
   // fit line through minima for each component
   std::vector<std::tuple<cv::Point2i, cv::Point2i, double, double> > matchingSegments;
   for (int label = 0; label < currentLabel-1; ++label) {
@@ -249,7 +272,10 @@ std::vector<std::pair<int, int> > align(cv::VideoCapture Va, cv::VideoCapture Vb
     b = py-m*px;
     matchingSegments.push_back(std::make_tuple(upperLeft, lowerRight, m, b));
   }
+  std::time(&endtime);
+  std::cout << "Time to fit lines for all components: " << (endtime-starttime) << std::endl;
 
+  std::time(&starttime);
   // if a segment contains all frames of another segment, only keep longer one
   for (std::vector<std::tuple<cv::Point2i, cv::Point2i, double, double> >::iterator segment = matchingSegments.begin(); segment != matchingSegments.end();) {
     bool dropSegment = false;
@@ -264,7 +290,10 @@ std::vector<std::pair<int, int> > align(cv::VideoCapture Va, cv::VideoCapture Vb
     }
     if (!dropSegment) ++segment;
   }
+  std::time(&endtime);
+  std::cout << "Time to drop spurious segments: " << (endtime-starttime) << std::endl;
 
+  std::time(&starttime);
   std::vector<std::pair<int, int> > framePairs;
   std::vector<std::pair<int, int> > endpointsInParent;
   for (auto segment : matchingSegments) {
@@ -274,6 +303,8 @@ std::vector<std::pair<int, int> > align(cv::VideoCapture Va, cv::VideoCapture Vb
     double b = std::get<3>(segment);
     std::vector<int> frameX;
     std::vector<int> frameY;
+    std::vector<float> avglumaA;
+    std::vector<float> avglumaB;
     int previousPy = -1;
     for (int px = upperLeft.x; px < std::min(lowerRight.x+64, x); ++px) {
       int py = m*px+b;
@@ -291,8 +322,48 @@ std::vector<std::pair<int, int> > align(cv::VideoCapture Va, cv::VideoCapture Vb
 	frameY.push_back(py);
 	cv::Mat frame1Gray;
 	cv::cvtColor(frame1, frame1Gray, CV_BGR2GRAY);
+	avglumaA.push_back((float)cv::mean(frame1Gray)[0]);
 	cv::Mat frame2Gray;
 	cv::cvtColor(frame2, frame2Gray, CV_BGR2GRAY);
+	avglumaB.push_back((float)cv::mean(frame2Gray)[0]);
+      }
+    }
+    cv::Mat s1(1, avglumaA.size()-1, CV_32F);
+    cv::Mat s2(1, avglumaB.size()-1, CV_32F);
+    for (int i = 1; i < avglumaA.size(); ++i) {
+      s1.at<float>(i-1) = avglumaA[i] - avglumaA[i-1];
+      s2.at<float>(i-1) = avglumaB[i] - avglumaB[i-1];
+    }
+    cv::Mat correl1;
+    cv::filter2D(s1, correl1, -1, s2, cv::Point2i(0, 0));
+    cv::Mat correl2;
+    cv::filter2D(s2, correl2, -1, s1, cv::Point2i(0, 0));
+    float max = correl1.at<float>(0);
+    int shiftA = 0;
+    for (int i = 1; i < correl1.cols; ++i) {
+      float coeff = correl1.at<float>(i);
+      if (coeff > max) {
+	shiftA = i;
+	max = coeff;
+      }
+    }
+    max = correl2.at<float>(0);
+    int shiftB = 0;
+    for (int i = 1; i < correl2.cols; ++i) {
+      float coeff = correl2.at<float>(i);
+      if (coeff > max) {
+	shiftB = i;
+	max = coeff;
+      }
+    }
+    int shift = shiftA + 1 - correl1.cols - shiftB;
+    if (shift != 0 && frameX.size() > shift) {
+      if (shift > 0) {
+	frameY.erase(frameY.begin(), frameY.begin() + shift);
+	frameX.erase(frameX.end() - shift, frameX.end());
+      } else {
+	frameX.erase(frameX.begin(), frameX.begin() - shift);
+	frameY.erase(frameY.end() + shift, frameY.end());
       }
     }
 
@@ -354,6 +425,8 @@ std::vector<std::pair<int, int> > align(cv::VideoCapture Va, cv::VideoCapture Vb
     trimEnd.transformations.push_back(temporalTrimming);
     deltaReport.push_back(trimEnd);
   }
+  std::time(&endtime);
+  std::cout << "Time to correlate sequences and match frames: " << (endtime-starttime) << std::endl;
   return framePairs;
 }
 
@@ -415,9 +488,6 @@ void detectAndCropBorders(Clip& clip, cv::Mat& frame1, cv::Mat& frame2) {
 
 
 std::vector<Transformation> compareBlocks(cv::Mat& region1, cv::Mat& region2, const int blockSize) {
-  cv::imshow("region1", region1);
-  cv::imshow("region2", region2);
-  cv::waitKey();
   int BLOCK_AREA = blockSize*blockSize;
   const double c_1 = 6.5025;  // (k1*L)^2 = (0.01*255)^2 -- k's are default constants
   const double c_2 = 58.5225; // (k2*L)^2 = (0.03*255)^2 -- L is dynamic range
@@ -449,7 +519,6 @@ std::vector<Transformation> compareBlocks(cv::Mat& region1, cv::Mat& region2, co
       variance_y -= meansquare_y;
       covariance -= mean_x*mean_y;
       double ssim = ((2*mean_x*mean_y + c_1)*(2*covariance + c_2)) / ((meansquare_x + meansquare_y + c_1)*(variance_x + variance_y + c_2));
-      std::cout << "ssim = " << ssim << " ";
       if (ssim < SSIM_THRESHOLD) {
 	Transformation blockModification;
 	blockModification.type = "block modification";
@@ -459,7 +528,6 @@ std::vector<Transformation> compareBlocks(cv::Mat& region1, cv::Mat& region2, co
       }
     }
   }
-  std::cout << "; blockModifications.size() = " << blockModifications.size() << std::endl;
   return blockModifications;
 }
 
@@ -600,7 +668,11 @@ int main(int argc, char** argv) {
   cv::VideoCapture Va(argv[1]);
   cv::VideoCapture Vb(argv[2]);
   std::vector<std::pair<int, int> > framePairs = align(Va, Vb);
+  std::time_t starttime = std::time(nullptr);
   diff(Va, Vb, framePairs);
+  std::time_t endtime = std::time(nullptr);
+  std::cout << "Total number of frames: " << framePairs.size()
+	    << "; time to compare: " << (endtime-starttime) << std::endl;
   std::cout << "delta report:" << std::endl;
   for (Clip clip : deltaReport) {
     std::cout << " clip at [" << clip.endpoints.first << ", "
