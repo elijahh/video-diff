@@ -18,7 +18,6 @@
 
 const int DISTANCE_TAU = 16; // threshold for binarizing distance matrix
 const int BLOCK_SIZE = 32; // standard block size to compare between frames
-const float SSIM_THRESHOLD = 0.9; // threshold for structural similarity of blocks
 
 struct Transformation {
   std::string type;
@@ -160,6 +159,8 @@ std::vector<std::pair<int, int> > align(cv::VideoCapture Va, cv::VideoCapture Vb
   }
   std::time(&endtime);
   std::cout << "Time to compute distance matrix and binarize: " << (endtime-starttime) << std::endl;
+  cv::imwrite("distances.ppm", distances);
+  cv::imwrite("distancesBinarized.ppm", distancesBinarized);
 
   std::time(&starttime);
   // apply morphological opening
@@ -170,6 +171,7 @@ std::vector<std::pair<int, int> > align(cv::VideoCapture Va, cv::VideoCapture Vb
   cv::dilate(distancesBinarizedTemp, distancesBinarized, elementDilation);
   std::time(&endtime);
   std::cout << "Time to apply morphological opening: " << (endtime-starttime) << std::endl;
+  cv::imwrite("distancesOpened.ppm", distancesBinarized);
 
   std::time(&starttime);
   // label connected components
@@ -414,10 +416,12 @@ std::vector<std::pair<int, int> > align(cv::VideoCapture Va, cv::VideoCapture Vb
   trimBegin.transformations.push_back(temporalTrimming);
   deltaReport.push_back(trimBegin);
   for (int i = 0; i < endpointsInParent.size()-1; ++i) {
-    Clip clip;
-    clip.parentEndpoints = std::make_pair(endpointsInParent[i].second, endpointsInParent[i+1].first);
-    clip.transformations.push_back(temporalTrimming);
-    deltaReport.push_back(clip);
+    if (endpointsInParent[i+1].first > endpointsInParent[i].second) {
+      Clip clip;
+      clip.parentEndpoints = std::make_pair(endpointsInParent[i].second, endpointsInParent[i+1].first);
+      clip.transformations.push_back(temporalTrimming);
+      deltaReport.push_back(clip);
+    }
   }
   if (endpointsInParent[endpointsInParent.size()-1].second != x-1) {
     Clip trimEnd;
@@ -487,13 +491,14 @@ void detectAndCropBorders(Clip& clip, cv::Mat& frame1, cv::Mat& frame2) {
 }
 
 
-std::vector<Transformation> compareBlocks(cv::Mat& region1, cv::Mat& region2, const int blockSize) {
+std::vector<Transformation> compareBlocks(cv::Mat& region1, cv::Mat& region2, const int blockSize, const float ssimThreshold) {
   int BLOCK_AREA = blockSize*blockSize;
   const double c_1 = 6.5025;  // (k1*L)^2 = (0.01*255)^2 -- k's are default constants
   const double c_2 = 58.5225; // (k2*L)^2 = (0.03*255)^2 -- L is dynamic range
   std::vector<Transformation> blockModifications;
-  for (int i = 0; i < region1.cols / blockSize; ++i) {
-    for (int j = 0; j < region1.rows / blockSize; ++j) {
+  int i, j;
+  for (i = 0; i < region1.cols / blockSize; ++i) {
+    for (j = 0; j < region1.rows / blockSize; ++j) {
       cv::Rect block = cv::Rect(i*blockSize, j*blockSize, blockSize, blockSize);
       cv::Mat block1 = region1(block);
       cv::Mat block2 = region2(block);
@@ -519,7 +524,7 @@ std::vector<Transformation> compareBlocks(cv::Mat& region1, cv::Mat& region2, co
       variance_y -= meansquare_y;
       covariance -= mean_x*mean_y;
       double ssim = ((2*mean_x*mean_y + c_1)*(2*covariance + c_2)) / ((meansquare_x + meansquare_y + c_1)*(variance_x + variance_y + c_2));
-      if (ssim < SSIM_THRESHOLD) {
+      if (ssim < ssimThreshold) {
 	Transformation blockModification;
 	blockModification.type = "block modification";
 	blockModification.position = cv::Point2i(i*blockSize, j*blockSize);
@@ -528,7 +533,12 @@ std::vector<Transformation> compareBlocks(cv::Mat& region1, cv::Mat& region2, co
       }
     }
   }
-  return blockModifications;
+  if (blockModifications.size() < (i*j)*0.4) { // hardcoded threshold
+    // -- detected modifications must make up less than 40% of total blocks
+    return blockModifications;
+  } else {
+    return std::vector<Transformation>();
+  }
 }
 
 
@@ -543,29 +553,16 @@ void detectKeypoints(Clip& clip, cv::Mat& frame1, cv::Mat& frame2) {
   extractor.compute(frame1, kp1, des1);
   extractor.compute(frame2, kp2, des2);
   cv::FlannBasedMatcher matcher;
-  std::vector<std::vector<cv::DMatch> > matches;
-  //  std::vector<cv::DMatch> matches2;
-  matcher.knnMatch(des1, des2, matches, 2);
-  //matcher.match(des1, des2, matches1);
-  //matcher.match(des2, des1, matches2);
+  std::vector<cv::DMatch> matches;
+  matcher.match(des1, des2, matches);
   std::vector<cv::DMatch> good_matches;
   for (int i = 0; i < des1.rows; i++) {
-    if (matches[i].size() == 2) { // ratio test
-      if (matches[i][0].distance <= 0.7*matches[i][1].distance) {
-	good_matches.push_back(matches[i][0]);
-      }
+    if (matches[i].distance < 0.1) { // hardcoded threshold
+      good_matches.push_back(matches[i]);
     }
   }
-  /*for (std::vector<cv::DMatch>::const_iterator iter1 = matches1.begin(); iter1 != matches1.end(); ++iter1) {
-    for (std::vector<cv::DMatch>::const_iterator iter2 = matches2.begin(); iter2 != matches2.end(); ++iter2) {
-      if ((*iter1).queryIdx == (*iter2).trainIdx && (*iter2).queryIdx == (*iter1).trainIdx) {
-	good_matches.push_back(*iter1);
-	break;
-      }
-    }
-    }*/
   
-  if (good_matches.size() < 4) return; // can't proceed with comparison if frames don't match
+  if (good_matches.size() < 50) return; // hardcoded threshold -- can't proceed with comparison if frames don't match
 
   // crop to keypoints
   cv::Point2i point1 = kp1[good_matches[0].queryIdx].pt;
@@ -577,8 +574,8 @@ void detectKeypoints(Clip& clip, cv::Mat& frame1, cv::Mat& frame2) {
   for (auto m : good_matches) {
     point1 = kp1[m.queryIdx].pt;
     point2 = kp2[m.trainIdx].pt;
-    int size1 = (int) kp1[m.queryIdx].size;
-    int size2 = (int) kp2[m.trainIdx].size;
+    int size1 = 0; // (int) (kp1[m.queryIdx].size / 2);
+    int size2 = 0; // (int) (kp2[m.trainIdx].size / 2);
     upperLeft1 = cv::Point2i(std::max(std::min(upperLeft1.x, point1.x - size1), 0), std::max(std::min(upperLeft1.y, point1.y - size1), 0));
     lowerRight1 = cv::Point2i(std::min(frame1.cols-1, std::max(lowerRight1.x, point1.x + size1)), std::min(frame1.rows-1, std::max(lowerRight1.y, point1.y + size1)));
     upperLeft2 = cv::Point2i(std::max(std::min(upperLeft2.x, point2.x - size2), 0), std::max(std::min(upperLeft2.y, point2.y - size2), 0));
@@ -636,9 +633,9 @@ void detectKeypoints(Clip& clip, cv::Mat& frame1, cv::Mat& frame2) {
   cv::split(region2, region2Channels);
   cv::Mat region1Gray = region1Channels[0];
   cv::Mat region2Gray = region2Channels[0];
-  std::vector<Transformation> checkFramesMatch = compareBlocks(region1Gray, region2Gray, std::min(region1Gray.cols, region1Gray.rows));
+  std::vector<Transformation> checkFramesMatch = compareBlocks(region1Gray, region2Gray, std::min(region1Gray.cols, region1Gray.rows), 0.9);
   if (!checkFramesMatch.empty()) return;
-  std::vector<Transformation> blockModifications = compareBlocks(region1Gray, region2Gray, BLOCK_SIZE);
+  std::vector<Transformation> blockModifications = compareBlocks(region1Gray, region2Gray, BLOCK_SIZE, 0.5);
   clip.transformations.insert(clip.transformations.end(), blockModifications.begin(), blockModifications.end());
 }
 
