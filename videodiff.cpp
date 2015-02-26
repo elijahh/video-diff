@@ -492,36 +492,48 @@ std::vector<Transformation> compareBlocks(cv::Mat& region1, cv::Mat& region2, co
   int i, j;
   for (i = 0; i < region1.cols / blockSize; ++i) {
     for (j = 0; j < region1.rows / blockSize; ++j) {
-      cv::Rect block = cv::Rect(i*blockSize, j*blockSize, blockSize, blockSize);
+      int subblockSize = 0.88*blockSize;
+      int gap = blockSize-subblockSize;
+      subblockSize -= gap;
+      cv::Rect block = cv::Rect(i*blockSize+gap, j*blockSize+gap, subblockSize, subblockSize); // center subblock
       cv::Mat block1 = region1(block);
-      cv::Mat block2 = region2(block);
-      double mean_x = 0;
-      double mean_y = 0;
-      double variance_x = 0;
-      double variance_y = 0;
-      double covariance = 0;
-      for (int k = 0; k < blockSize; ++k) {
-	for (int l = 0; l < blockSize; ++l) {
-	  double x = block1.at<uchar>(l, k);
-	  double y = block2.at<uchar>(l, k);
-	  mean_x += x / BLOCK_AREA;
-	  mean_y += y / BLOCK_AREA;
-	  variance_x += x*x / BLOCK_AREA;
-	  variance_y += y*y / BLOCK_AREA;
-	  covariance += x*y / BLOCK_AREA;
+      // account for imprecision in keypoint matching
+      // compare to all other subblocks within block, get max SSIM
+      double max_ssim = -1.0;
+      for (int block_shift_x = 0; block_shift_x < gap; ++block_shift_x) {
+	for (int block_shift_y = 0; block_shift_y < gap; ++block_shift_y) {
+	  cv::Rect subblock = cv::Rect(i*blockSize + block_shift_x, j*blockSize + block_shift_y, subblockSize, subblockSize);
+	  cv::Mat block2 = region2(subblock);
+	  double mean_x = 0;
+	  double mean_y = 0;
+	  double variance_x = 0;
+	  double variance_y = 0;
+	  double covariance = 0;
+	  for (int k = 0; k < subblockSize; ++k) {
+	    for (int l = 0; l < subblockSize; ++l) {
+	      double x = block1.at<uchar>(l, k);
+	      double y = block2.at<uchar>(l, k);
+	      mean_x += x / BLOCK_AREA;
+	      mean_y += y / BLOCK_AREA;
+	      variance_x += x*x / BLOCK_AREA;
+	      variance_y += y*y / BLOCK_AREA;
+	      covariance += x*y / BLOCK_AREA;
+	    }
+	  }
+	  double meansquare_x = mean_x*mean_x;
+	  double meansquare_y = mean_y*mean_y;
+	  variance_x -= meansquare_x;
+	  variance_y -= meansquare_y;
+	  covariance -= mean_x*mean_y;
+	  double ssim = ((2*mean_x*mean_y + c_1)*(2*covariance + c_2)) / ((meansquare_x + meansquare_y + c_1)*(variance_x + variance_y + c_2));
+	  if (ssim > max_ssim) max_ssim = ssim;
 	}
       }
-      double meansquare_x = mean_x*mean_x;
-      double meansquare_y = mean_y*mean_y;
-      variance_x -= meansquare_x;
-      variance_y -= meansquare_y;
-      covariance -= mean_x*mean_y;
-      double ssim = ((2*mean_x*mean_y + c_1)*(2*covariance + c_2)) / ((meansquare_x + meansquare_y + c_1)*(variance_x + variance_y + c_2));
-      if (ssim < ssimThreshold) {
+      if (max_ssim < ssimThreshold) {
 	Transformation blockModification;
 	blockModification.type = "block modification";
 	blockModification.position = cv::Point2i(i*blockSize, j*blockSize);
-	blockModification.degree = cv::Point2f(blockSize, ssim);
+	blockModification.degree = cv::Point2f(blockSize, max_ssim);
 	blockModifications.push_back(blockModification);
       }
     }
@@ -567,8 +579,8 @@ void detectKeypoints(Clip& clip, cv::Mat& frame1, cv::Mat& frame2) {
   for (auto m : good_matches) {
     point1 = kp1[m.queryIdx].pt;
     point2 = kp2[m.trainIdx].pt;
-    int size1 = 0; // (int) (kp1[m.queryIdx].size / 2);
-    int size2 = 0; // (int) (kp2[m.trainIdx].size / 2);
+    int size1 = kp1[m.queryIdx].size / 2;
+    int size2 = kp2[m.trainIdx].size / 2;
     upperLeft1 = cv::Point2i(std::max(std::min(upperLeft1.x, point1.x - size1), 0), std::max(std::min(upperLeft1.y, point1.y - size1), 0));
     lowerRight1 = cv::Point2i(std::min(frame1.cols-1, std::max(lowerRight1.x, point1.x + size1)), std::min(frame1.rows-1, std::max(lowerRight1.y, point1.y + size1)));
     upperLeft2 = cv::Point2i(std::max(std::min(upperLeft2.x, point2.x - size2), 0), std::max(std::min(upperLeft2.y, point2.y - size2), 0));
