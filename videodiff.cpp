@@ -7,17 +7,20 @@
 //
 // Set of possible transformations:
 //
-//  Spatial - scaling, cropping, object modification, color adjustment, grayscale, bordering, block artifact (lossy compression)
+//  Spatial - scaling, cropping, block modification (general content tampering), color adjustment, bordering
 //  Temporal - scaling, cropping
 //
 
 #include <ctime>
-#include <opencv2/opencv.hpp>
+#include <iostream>
+#include <opencv2/core/core.hpp>
+#include <opencv2/imgproc/imgproc.hpp>
+#include <opencv2/features2d/features2d.hpp>
 #include <opencv2/highgui/highgui.hpp>
 #include <opencv2/nonfree/nonfree.hpp>
 
 const int DISTANCE_TAU = 16; // threshold for binarizing distance matrix
-const int BLOCK_SIZE = 32; // standard block size to compare between frames
+const int BLOCK_SIZE = 128; // standard block size to compare between frames
 
 struct Transformation {
   std::string type;
@@ -183,117 +186,106 @@ std::vector<std::pair<int, int> > align(cv::VideoCapture Va, cv::VideoCapture Vb
       }
     }
   }
-  // load into matrix for clustering
-  cv::Mat matchingPointsMat = cv::Mat(matchingPoints.size(), 2, CV_32F);
+  // find distance minima for rows and columns
+  std::vector<cv::Point2i> minima;
+  std::map<int, int> minRowCoords;
+  std::map<int, int> minRowDists;
+  std::map<int, int> minColumnCoords;
+  std::map<int, int> minColumnDists;
   for (unsigned int i = 0; i < matchingPoints.size(); ++i) {
-    matchingPointsMat.at<float>(i, 0) = matchingPoints[i].x;
-    matchingPointsMat.at<float>(i, 1) = matchingPoints[i].y;
-  }
-  cv::Mat clusterLabels;
-  cv::Mat clusterCenters;
-  double bestCompactness = -1;
-  cv::Mat bestLabels;
-  int numClusters;
-  for (int K = 5; K > 0; --K) {
-    double compactness = cv::kmeans(matchingPointsMat, K, clusterLabels,
-				    cv::TermCriteria(CV_TERMCRIT_ITER + CV_TERMCRIT_EPS, 10, 1.0), 3, cv::KMEANS_RANDOM_CENTERS);
-    if (compactness < bestCompactness || bestCompactness == -1) {
-      bestCompactness = compactness;
-      bestLabels = clusterLabels.clone();
-      numClusters = K;
-    }
-  }
-  std::time(&endtime);
-  std::cout << "Total number of clusters: " << numClusters
-	    << "; time to discover: " << (endtime-starttime) << std::endl;
-
-  std::time(&starttime);
-  // find distance minima for rows and columns of components
-  bool *initialized = new bool[numClusters];
-  std::vector<cv::Point2i> *minima = new std::vector<cv::Point2i>[numClusters];
-  std::pair<int, int> *boundaries = new std::pair<int, int>[numClusters];
-  std::map<int, int> *minRowCoords = new std::map<int, int>[numClusters];
-  std::map<int, int> *minRowDists = new std::map<int, int>[numClusters];
-  std::map<int, int> *minColumnCoords = new std::map<int, int>[numClusters];
-  std::map<int, int> *minColumnDists = new std::map<int, int>[numClusters];
-  for (unsigned int i = 0; i < matchingPoints.size(); ++i) {
-    int label = bestLabels.at<int>(i);
-    std::map<int, int> *minRowCoord = &minRowCoords[label];
-    std::map<int, int> *minRowDist = &minRowDists[label];
-    std::map<int, int> *minColumnCoord = &minColumnCoords[label];
-    std::map<int, int> *minColumnDist = &minColumnDists[label];
     int px = matchingPoints[i].x;
     int py = matchingPoints[i].y;
     int distance = distances.at<uchar>(py, px);
-    std::map<int, int>::iterator yit = minRowDist->find(py);
-    std::map<int, int>::iterator xit = minColumnDist->find(px);
-    if (yit == minRowDist->end() || distance < yit->second) {
-      (*minRowCoord)[py] = px;
-      (*minRowDist)[py] = distance;
+    std::map<int, int>::iterator yit = minRowDists.find(py);
+    std::map<int, int>::iterator xit = minColumnDists.find(px);
+    if (yit == minRowDists.end() || distance < yit->second) {
+      minRowCoords[py] = px;
+      minRowDists[py] = distance;
     }
-    if (xit == minColumnDist->end() || distance < xit->second) {
-      (*minColumnCoord)[px] = py;
-      (*minColumnDist)[px] = distance;
-    }
-    if (!initialized[label]) {
-      boundaries[label] = std::make_pair(px, px);
-      initialized[label] = true;
-    } else {
-      boundaries[label] = std::make_pair(std::min(px, boundaries[label].first), std::max(px, boundaries[label].second)); // min x, max x
+    if (xit == minColumnDists.end() || distance < xit->second) {
+      minColumnCoords[px] = py;
+      minColumnDists[px] = distance;
     }
   }
-  for (int i = 0; i < numClusters; ++i) {
-    for (std::map<int, int>::iterator it = minRowCoords[i].begin(); it != minRowCoords[i].end(); ++it) {
-      minima[i].push_back(cv::Point2i(it->second, it->first));
-    }
-    for (std::map<int, int>::iterator it = minColumnCoords[i].begin(); it != minColumnCoords[i].end(); ++it) {
-      minima[i].push_back(cv::Point2i(it->first, it->second));
-    }
+  for (std::map<int, int>::iterator it = minRowCoords.begin(); it != minRowCoords.end(); ++it) {
+    minima.push_back(cv::Point2i(it->second, it->first));
+  }
+  for (std::map<int, int>::iterator it = minColumnCoords.begin(); it != minColumnCoords.end(); ++it) {
+    minima.push_back(cv::Point2i(it->first, it->second));
+  }
+  // load into matrix for clustering
+  cv::Mat minimaMat = cv::Mat(minima.size(), 2, CV_32F);
+  for (unsigned int i = 0; i < minima.size(); ++i) {
+    minimaMat.at<float>(i, 0) = minima[i].x;
+    minimaMat.at<float>(i, 1) = minima[i].y;
   }
   std::time(&endtime);
-  std::cout << "Time to find distance minima for all components: " << (endtime-starttime) << std::endl;
+  std::cout << "Time to find distance minima: " << (endtime-starttime) << std::endl;
 
   std::time(&starttime);
-  // fit line through minima for each component
-  std::vector<std::tuple<cv::Point2i, cv::Point2i, double, double> > matchingSegments;
-  for (int label = 0; label < numClusters; ++label) {
-    if (minima[label].empty()) continue;
-    cv::Vec4f line;
-    cv::fitLine(minima[label], line, CV_DIST_L2, 0, 0.01, 0.01);
-    double vx = line[0];
-    double vy = line[1];
-    double px = line[2];
-    double py = line[3];
-    double m = vy/vx;
-    double b = py-m*px;
-    cv::Point2i upperLeft = cv::Point2i(boundaries[label].first, m*boundaries[label].first+b);
-    cv::Point2i lowerRight = cv::Point2i(boundaries[label].second, m*boundaries[label].second+b);
-    // recompute line parameters
-    m = (double) (lowerRight.y - upperLeft.y) / (lowerRight.x - upperLeft.x);
-    b = py-m*px;
-    matchingSegments.push_back(std::make_tuple(upperLeft, lowerRight, m, b));
+  // cluster minima, fit line through each cluster and judge cluster quality by line fit
+  double bestMSE = -1;
+  std::vector<std::tuple<int, int, double, double> >* matchingSegments; // minX, maxX, m, b
+  for (int K = 5; K > 0; --K) {
+    cv::Mat clusterLabels;
+    cv::kmeans(minimaMat, K, clusterLabels,
+	       cv::TermCriteria(CV_TERMCRIT_ITER + CV_TERMCRIT_EPS, 10, 1.0), 3, cv::KMEANS_RANDOM_CENTERS);
+    std::vector<std::tuple<int, int, double, double> >* clusterSegments = new std::vector<std::tuple<int, int, double, double> >;
+    double meanMSE = 0;
+    for (int cluster = 0; cluster < K; ++cluster) { // fit line for each cluster
+      std::vector<cv::Point2i> clusterMinima;
+      int minX = x;
+      int maxX = 0;
+      for (int i = 0; i < clusterLabels.rows; ++i) {
+	int label = clusterLabels.at<int>(i);
+	if (label == cluster) {
+	  clusterMinima.push_back(minima[i]);
+	  if (minima[i].x < minX) minX = minima[i].x;
+	  if (minima[i].x > maxX) maxX = minima[i].x;
+	}
+      }
+      cv::Vec4f line;
+      cv::fitLine(clusterMinima, line, CV_DIST_L2, 0, 0.01, 0.01);
+      double vx = line[0];
+      double vy = line[1];
+      double somex = line[2];
+      double somey = line[3];
+      double m = vy/vx;
+      double b = somey-m*somex;
+      clusterSegments->push_back(std::make_tuple(minX, maxX, m, b));
+      // compute error of estimated line using column minima to determine cluster quality
+      double MSE = 0;
+      int N = 0;
+      for (int px = minX; px < std::min(maxX+64, x); ++px) {
+	int py = m*px+b;
+	std::map<int, int>::iterator true_value = minColumnCoords.find(px);
+	if (true_value == minColumnCoords.end()) continue;
+	int true_py = true_value->second;
+	int diff = (true_py - py);
+	MSE += diff*diff;
+	++N;
+      }
+      MSE /= N;
+      std::cout << "MSE = " << MSE << std::endl;
+      meanMSE += MSE/K;
+    }
+    if (meanMSE < bestMSE || bestMSE == -1) {
+      bestMSE = meanMSE;
+      matchingSegments = clusterSegments;
+    } else {
+      delete clusterSegments;
+    }
   }
   std::time(&endtime);
-  std::cout << "Time to fit lines for all components: " << (endtime-starttime) << std::endl;
-  std::cout << "# matching segments: " << matchingSegments.size() << std::endl;
-  for (auto segment : matchingSegments) {
-    std::cout << "(" << std::get<0>(segment) << ") -> (" << std::get<1>(segment) << "): y = " << std::get<2>(segment) << "x + " << std::get<3>(segment) << std::endl;
-  }
-
-  delete[] initialized;
-  delete[] minima;
-  delete[] boundaries;
-  delete[] minRowCoords;
-  delete[] minRowDists;
-  delete[] minColumnCoords;
-  delete[] minColumnDists;
+  std::cout << "Total number of clusters: " << matchingSegments->size() << "; mean MSE = " << bestMSE
+	    << "; time to discover: " << (endtime-starttime) << std::endl;
 
   std::time(&starttime);
   std::vector<std::pair<int, int> > framePairs;
   std::vector<std::pair<int, int> > endpointsInParent;
-  for (auto segment : matchingSegments) {
-    cv::Point2i upperLeft = std::get<0>(segment);
-    cv::Point2i lowerRight = std::get<1>(segment);
+  for (auto segment : *matchingSegments) {
+    int minX = std::get<0>(segment);
+    int maxX = std::get<1>(segment);
     double m = std::get<2>(segment);
     double b = std::get<3>(segment);
     std::vector<int> frameX;
@@ -301,7 +293,7 @@ std::vector<std::pair<int, int> > align(cv::VideoCapture Va, cv::VideoCapture Vb
     std::vector<float> avglumaA;
     std::vector<float> avglumaB;
     int previousPy = -1;
-    for (int px = upperLeft.x; px < std::min(lowerRight.x+64, x); ++px) {
+    for (int px = minX; px < std::min(maxX+64, x); ++px) {
       int py = m*px+b;
       if (py < 0 || py == previousPy) continue;
       if (py >= y) break;
@@ -323,6 +315,7 @@ std::vector<std::pair<int, int> > align(cv::VideoCapture Va, cv::VideoCapture Vb
 	avglumaB.push_back((float)cv::mean(frame2Gray)[0]);
       }
     }
+    if (frameX.empty() || frameY.empty()) continue;
     cv::Mat s1(1, avglumaA.size()-1, CV_32F);
     cv::Mat s2(1, avglumaB.size()-1, CV_32F);
     for (unsigned int i = 1; i < avglumaA.size(); ++i) {
@@ -437,7 +430,7 @@ int getBorderSize(cv::Mat frame, bool x) {
     for (int j = 0; j < frame.cols; ++j) {
       cv::Vec3b diff1 = frame.at<cv::Vec3b>(i, j) - color;
       cv::Vec3b diff2 = frame.at<cv::Vec3b>(frame.rows-i-1, j) - color;
-      if (std::abs(diff1.val[0]) > 5 || std::abs(diff1.val[1]) > 5
+      if (std::abs(diff1.val[0]) > 5 || std::abs(diff1.val[1]) > 5 // hardcoded epsilon
 	  || std::abs(diff1.val[2]) > 5 || std::abs(diff2.val[0]) > 5
 	  || std::abs(diff2.val[1]) > 5 || std::abs(diff2.val[2]) > 5) {
 	endBorder = true;
@@ -457,17 +450,17 @@ void detectAndCropBorders(Clip& clip, cv::Mat& frame1, cv::Mat& frame2) {
   int borderX2 = getBorderSize(frame2, true);
   int borderYDelta = borderY1 - borderY2;
   int borderXDelta = borderX1 - borderX2;
-  if (frame1.rows != frame2.rows || frame1.cols != frame2.cols) {
+  if (std::abs(frame1.rows - frame2.rows) <= 5 || std::abs(frame1.cols - frame2.cols) <= 5) { // hardcoded epsilon
     float scalingY = (float) frame2.rows / frame1.rows;
     float scalingX = (float) frame2.cols / frame1.cols;
-    if (((frame1.rows - frame2.rows) / 2 == borderYDelta)
-	|| ((frame1.cols - frame2.cols) / 2 == borderXDelta)) {
+    if (std::abs((frame1.rows - frame2.rows) / 2 - borderYDelta) <= 5 // hardcoded epsilon
+	|| std::abs((frame1.cols - frame2.cols) / 2 - borderXDelta) <= 5) {
       Transformation borderChange;
       borderChange.type = "border change";
       borderChange.degree = cv::Point2f(-borderXDelta, -borderYDelta);
       clip.transformations.push_back(borderChange);
-    } else if (scalingY * borderY1 == borderY2
-	       || scalingX * borderX1 == borderX2) {
+    } else if (std::abs(scalingY * borderY1 - borderY2) <= 5 // hardcoded epsilon
+	       || std::abs(scalingX * borderX1 - borderX2) <= 5) {
       Transformation spatialScaling;
       spatialScaling.type = "spatial scaling";
       spatialScaling.degree = cv::Point2f(scalingX, scalingY);
@@ -557,6 +550,7 @@ void detectKeypoints(Clip& clip, cv::Mat& frame1, cv::Mat& frame2) {
   cv::Mat des1, des2;
   extractor.compute(frame1, kp1, des1);
   extractor.compute(frame2, kp2, des2);
+  if (des1.empty() || des2.empty()) return;
   cv::FlannBasedMatcher matcher;
   std::vector<cv::DMatch> matches;
   matcher.match(des1, des2, matches);
@@ -647,6 +641,7 @@ void detectKeypoints(Clip& clip, cv::Mat& frame1, cv::Mat& frame2) {
 
 void diff(cv::VideoCapture Va, cv::VideoCapture Vb, const std::vector<std::pair<int, int> >& framePairs) {
   for (unsigned int i = 0; i < framePairs.size()-1; ++i) {
+    if (framePairs[i+1].second <= framePairs[i].second) continue;
     std::pair<int, int> p = framePairs[i];
     Va.set(CV_CAP_PROP_POS_FRAMES, p.first);
     Vb.set(CV_CAP_PROP_POS_FRAMES, p.second);
